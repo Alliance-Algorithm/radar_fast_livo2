@@ -1,0 +1,123 @@
+# radar_fast_livo2 参数配置
+# Odin1 dToF LiDAR + IMU + HIK 12MP 卷帘快门相机 融合建图
+#
+# WARN: 外参占位值均为全零/单位矩阵，部署前必须用 direct_visual_lidar_calibration
+# （LiDAR-Camera）+ 手眼标定或出厂标定文件（IMU-LiDAR）替换为实测值。
+
+radar_fast_livo2_node:
+  ros__parameters:
+    # ── Topics ──────────────────────────────────────────────────
+    lidar_topic: "/odin1/cloud_raw"
+    imu_topic:   "/odin1/imu"
+    img_topic:   "/camera/image_raw"   # HIK 相机驱动发布的 topic，按实际改
+
+    # ── SLAM 模式 ───────────────────────────────────────────────
+    # 1 = ONLY_LIO（先跑通这个，验证 Odin1 适配无误）
+    # 2 = LIVO（LiDAR+IMU+Camera 完整融合，第二阶段再开）
+    slam_mode: 1
+    img_en: false
+
+    # ── Odin1 dToF 预处理 ───────────────────────────────────────
+    lidar_type: 5              # ODIN1（见 common_lib.hpp LidarType 枚举）
+    point_filter_num: 1        # 256x192=49152点/帧，不降采样，全量送入
+    blind: 0.1                 # 最近有效距离 (m)
+    max_range: 30.0            # 最远有效距离 (m)
+    confidence_threshold: 25   # dToF 置信度阈值，降低以纳入更多有效点
+
+    # ── IMU ─────────────────────────────────────────────────────
+    imu_en: true
+    init_imu_num: 20           # 静止初始化所需 IMU 帧数（400Hz下约50ms）
+    # 陀螺仪/加速度计噪声协方差 (per sqrt(Hz))——白噪声谱密度。
+    # Allan 方差静止30min实测值（ARW/VRW）给出理论下限 gyr:2e-8 acc:6.4e-7，
+    # 但 Allan 静止标定不捕获动态误差源（比例因子误差、g敏感性、外参残差、
+    # 去畸变残差等），这些误差项只在实际运动中才出现，直接用理论下限会让
+    # 滤波器过于信任 IMU、抑制 LiDAR 修正（实测：静止完美但运动瞬间发散）。
+    # 0.01 是三轮判别测试（2e-8/1e-3/0.01）里静止漂移最好的一档，运动发散
+    # 问题已确认根因在别处（见下方 UpdateVoxelMap 相关注释），不再是此参数。
+    gyr_cov: 0.01
+    acc_cov: 0.01
+    # bias 随机游走协方差（bias 变化速率）。对齐官方 FAST-LIVO2 硬编码值
+    # 0.0001（LIVMapper.cpp set_gyr_bias_cov/set_acc_bias_cov）。
+    # Allan 方差实测值（gyr:5e-10, acc:2.75e-7）过小，导致滤波器无法追踪
+    # 运动时的真实 bias 变化（体温漂移、振动耦合等），状态估计偏差累积后
+    # 特征匹配失败。0.0001 是标准 ESIKF/INS 做法：比测量噪声小 ~100 倍，
+    # 允许慢速 bias 漂移但不被瞬时噪声污染。
+    gyr_bias_cov: 0.0001
+    acc_bias_cov: 0.0001
+
+    # imu_time_offset / img_time_offset: 跨传感器整体时间平移，
+    # 用于补偿传输/处理链路造成的固定延迟差。
+    # Odin1 在 use_host_ros_time=0（odin_driver.yaml 默认配置）下，
+    # IMU/cloud_raw/odometry 全部使用设备内部统一时钟打时间戳，
+    # 跨 topic 时间基准已经一致，通常不需要再调这两个offset，保持0即可。
+    # 只有当 use_host_ros_time 改成 1/2，或链路上有额外硬件延迟时才需要实测标定。
+    # img_time_offset 是相机（HIK，独立于Odin1时钟域）与Odin1数据的时间差，
+    # 只在 LIVO 模式（slam_mode=2）接相机时才需要关心。
+    imu_time_offset: 0.0
+    img_time_offset: 0.0
+
+    # ── IMU-LiDAR 外参（Odin1 设备校准值，T_imu_lidar）──────────
+    # 来源: /odin1/wiwc twist.covariance[0..15]（实测每台设备读取）。
+    # 曾怀疑过该值来源可疑，试过替换为官方 Wiki §5.2 固定值
+    # [-0.02663, 0.03447, 0.02174] + 单位旋转，但实测静止漂移从
+    # 2-15mm 恶化到 32.8mm，运动发散也没有改善——说明外参不是运动
+    # 发散的主因，WiWC 实测值（带~1°小旋转）比官方"固定值"更贴合
+    # 这台具体设备的机械安装误差，改回实测值。
+    # 运动发散的真正根因见下方 voxel_map 相关注释：单视角静态建图
+    # + UpdateVoxelMap 保护阈值 在走动到地图未覆盖区域时会形成死锁。
+    extrinsic_T: [-0.02809819, 0.02407025, 0.03455344]
+    extrinsic_R: [0.99994728, -0.00933787, 0.00427184,
+                  0.00940712,  0.99981980, -0.01648837,
+                 -0.00411710,  0.01652768,  0.99985493]
+    extrinsic_est_en: false    # 使用已知外参，关在线估计
+
+    # ── Camera-LiDAR 外参（占位，需用 direct_visual_lidar_calibration 标定）──
+    # T_lidar_camera 分解: Rcl = 相机→LiDAR旋转, Pcl = 相机→LiDAR平移
+    Pcl: [0.0, 0.0, 0.0]
+    Rcl: [1.0, 0.0, 0.0,
+          0.0, 1.0, 0.0,
+          0.0, 0.0, 1.0]
+
+    # ── 相机内参（占位，需用标定工具获得，HIK 12MP相机需先降采样）──
+    cam_fx: 500.0
+    cam_fy: 500.0
+    cam_cx: 640.0
+    cam_cy: 360.0
+    cam_width: 1280    # 降采样后的宽（原始 12MP 需先 resize，见 img_scale）
+    cam_height: 720
+    img_scale: 0.5     # 相对原始 12MP 图像的缩放比例，直接法必须降到可实时处理的分辨率
+
+    # ── VIO（LIVO模式才生效）────────────────────────────────────
+    patch_size: 8
+    patch_pyramid_level: 4
+
+    # ── 地图管理 ────────────────────────────────────────────────
+    filter_size_surf: 0.1      # 特征点降采样体素大小 (m)
+    filter_size_map: 0.15      # ikd-Tree 地图降采样体素大小 (m)
+    cube_side_length: 1000.0   # ikd-Tree 局部地图立方体边长 (m)
+
+    # ── Voxel Map 参数 ──────────────────────────────────────────
+    voxel_map/max_layer: 2         # 面阵 dToF 小块平面需细分
+    voxel_map/voxel_size: 0.5
+    voxel_map/planner_threshold: 0.01
+    voxel_map/layer_init_num: [3, 5, 5, 5, 5]  # 降低根层阈值
+    # 点到平面接受阈值的 sigma 倍数，从默认 3.0 放宽到 4.5：大场景（数千
+    # 有效特征）下 state 微小扰动会让部分点跌出 3σ 边界，effective feature
+    # 数量骤降触发 ESIKF 欠约束，配合 gyr_cov/acc_cov 过大的先验协方差
+    # 形成振荡发散（详见静止测试 frame 234+ 复现）。放宽阈值让点接受判定
+    # 对状态微扰更鲁棒，打断这个振荡触发链路。
+    voxel_map/sigma_num: 4.5
+    # WARN: map_sliding_en 必须开启。UpdateVoxelMap 现在无条件执行（对齐
+    # 官方 FAST-LIVO2 LIVMapper.cpp handleLIO 的做法，之前加的有效特征
+    # 阈值保护在"走到地图未覆盖新区域"场景下会把地图冻死，已移除），一旦
+    # 状态真的发散，每帧会在错误世界坐标创建大量新 voxel，没有地图滑动
+    # 窗口的话内存会无界增长（Oracle 诊断确认的风险点）。half_map_size=100
+    # × voxel_size=0.5m = 50米半径滑窗，室内步行场景足够。
+    voxel_map/map_sliding_en: true
+    voxel_map/half_map_size: 100
+    voxel_map/sliding_thresh: 8.0
+
+    # ── 地图保存 ────────────────────────────────────────────────
+    pcd_save_en: true
+    pcd_save_interval: -1      # -1 = 建图结束时统一保存；注意内存占用（长时间建图会积累巨量点）
+    map_save_path: "/workspace/model/generated/fast_livo2_map.pcd"
