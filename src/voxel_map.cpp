@@ -471,22 +471,22 @@ void VoxelMapManager::StateEstimation(StatesGroup& state_propagat) {
                   << ", effective feature num: " << effct_feat_num_ << ", average residual: "
                   << (effct_feat_num_ > 0 ? total_residual / effct_feat_num_ : 0.0) << std::endl;
 
-        // FIXME: 有效特征数过低（<min_effct_feat_for_correction_）时跳过本轮
-        // ESIKF 修正，state_ 保持为 IMU 传播先验（state_propagat）不变，但
-        // 循环上面的 BuildResidualListOMP 已经跑过，UpdateVoxelMap 仍会在
-        // 调用方无条件执行（地图继续吸收看到的点，不受此处影响）。原因：
-        // 极少数点（个位数到几百个）大多来自单一小平面，只能约束1-2个自由
-        // 度，却被当全局6维观测去修正，容易在欠约束方向注入错误运动——
-        // 实测复现：dToF 面阵传感器转弯/遇到低反射率场景时 raw 点数瞬间
-        // 骤降(如47k→16k持续2-3帧)，几十到几百个点的"病态修正"把 state
-        // 带偏，后续即使 raw 点恢复也无法重新匹配（voxel_map 相关注释里
-        // 记录的 frame858+ 发散链路）。阈值给 500：低于此值默认信息量
-        // 不足以支撑 6 维状态观测，宁可信任 IMU 短时传播的平滑性。
-        constexpr int kMinEffectFeatForCorrection = 500;
-        if (effct_feat_num_ < kMinEffectFeatForCorrection) {
-            EKF_stop_flg = true;
-            break;
-        }
+        // FIXME (Oracle 架构裁决，移除此前的 kMinEffectFeatForCorrection=500
+        // 门限): 曾认为极少数点（几十到几百个，多来自单一小平面）会在欠约束
+        // 方向注入病态修正，但 Oracle 指出这混淆了"可观测性"和"异常值鲁棒性"
+        // 两个不同问题——可观测性由 Kalman gain 自动处理：H 的行数少甚至为
+        // 0 时，H_T_H 在欠约束方向趋于 0，K_1=(H_T_H+P^-1)^-1 退化为约等于 P，
+        // G=K_1*H_T_H 趋于 0，最终 solution=K_1*HTz+vec-G*vec 里 G*vec 项消失，
+        // 修正量自然趋于 0（即"信任 IMU 先验"），这正是 ESIKF 该有的行为，
+        // 不是故障。当年触发骤降的真实原因是 preprocess.cpp 里 Odin1 虚构
+        // 逐点时间戳导致运动去畸变把点云"拧散"（已修复，见 preprocess.cpp
+        // curvature=0 相关 FIXME），门限只是在掩盖那个根因的症状。留着这
+        // 门限反而有害：真实稀疏场景（走廊/空旷区）里有效点跌破 500 是合法
+        // 情况，门限会连着几十到几百个可用点一起扔掉，逼状态纯 IMU 漂移——
+        // 这恰恰是它想防止的发散。上游 FAST-LIVO2 StateEstimation() 全程无
+        // 任何有效特征数门限，异常值鲁棒性由 BuildResidualListOMP 里逐点的
+        // sigma_num*sqrt(sigma_l) 平面方差加权（本身已实现）负责，不需要
+        // 额外的全局计数门限。
 
         // d. 构建雅可比 H 和信息矩阵
         Eigen::MatrixXd Hsub(effct_feat_num_, 6);

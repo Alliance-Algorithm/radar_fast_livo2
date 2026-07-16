@@ -310,19 +310,26 @@ private:
 
     // ── 回调 ────────────────────────────────────────────────────
     void on_imu(const sensor_msgs::msg::Imu::SharedPtr msg) {
-        std::lock_guard<std::mutex> lock(imu_buf_mutex_);
-        ImuData d;
-        d.timestamp = rclcpp::Time(msg->header.stamp).seconds() + imu_time_offset_;
-        d.acc  = {msg->linear_acceleration.x,
-                  msg->linear_acceleration.y,
-                  msg->linear_acceleration.z};
-        d.gyro = {msg->angular_velocity.x,
-                  msg->angular_velocity.y,
-                  msg->angular_velocity.z};
-        imu_buf_.push_back(d);
-        auto it = imu_buf_.begin();
-        while (it != imu_buf_.end() && (d.timestamp - it->timestamp) > 2.0) ++it;
-        if (it != imu_buf_.begin()) imu_buf_.erase(imu_buf_.begin(), it);
+        {
+            std::lock_guard<std::mutex> lock(imu_buf_mutex_);
+            ImuData d;
+            d.timestamp = rclcpp::Time(msg->header.stamp).seconds() + imu_time_offset_;
+            d.acc  = {msg->linear_acceleration.x,
+                      msg->linear_acceleration.y,
+                      msg->linear_acceleration.z};
+            d.gyro = {msg->angular_velocity.x,
+                      msg->angular_velocity.y,
+                      msg->angular_velocity.z};
+            imu_buf_.push_back(d);
+            auto it = imu_buf_.begin();
+            while (it != imu_buf_.end() && (d.timestamp - it->timestamp) > 2.0) ++it;
+            if (it != imu_buf_.begin()) imu_buf_.erase(imu_buf_.begin(), it);
+        }
+        // 若上一帧因 IMU 未追上而挂在 lidar_buf_ 里等待重试，这里顺带
+        // 尝一次（IMU 400Hz 到达，比等下一个 10Hz LiDAR 帧触发重试快得
+        // 多）。process_frame() 内部在 lidar_buf_ 为空或 IMU 仍不足时
+        // 会快速 return，正常路径下这个额外调用几乎零开销。
+        process_frame();
     }
 
     void on_lidar(const sensor_msgs::msg::PointCloud2::SharedPtr msg) {
@@ -330,14 +337,17 @@ private:
         // process_frame() 内部会再次对 lidar_buf_mutex_ 上锁（非递归锁，同线程
         // 重复 lock() 是自死锁，曾导致节点收到第一帧后永久冻结、后续任何回调
         // 都不再被单线程 executor 调度）。
+        // FIXME (Oracle 架构裁决): 曾在 buffer>3 时 pop_front 丢最旧帧，对齐
+        // 上游 FAST-LIVO2 sync_packages() 后发现这是错误设计——上游从不丢帧，
+        // IMU 未追上时只是 return false 重试，帧留在 deque 里等，只有延迟没有
+        // 丢失。丢帧对 ESIKF 是破坏性的：丢的不是"跳过一次修正"（那样估计仍
+        // 无偏，只是协方差变大），而是打断了 IMU 积分锚点连续性——下一帧处理
+        // 时 process_frame() 用的是 frame_beg，不会自动把丢失区间的 IMU 积分
+        // 补上。改为只入队不丢弃，配合 process_frame() 里的 peek-not-pop
+        // 重试逻辑，让处理跟不上时自然产生延迟而不是数据丢失。
         {
             std::lock_guard<std::mutex> lock(lidar_buf_mutex_);
             lidar_buf_.push_back(msg);
-            if (lidar_buf_.size() > 3) {
-                RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 2000,
-                    "LiDAR buffer growing (%zu), processing too slow", lidar_buf_.size());
-                lidar_buf_.pop_front();
-            }
         }
         // 同步处理（单线程，LiDAR 帧到达时触发；此时已不持有 lidar_buf_mutex_）
         process_frame();
@@ -394,13 +404,17 @@ private:
         using clock = std::chrono::high_resolution_clock;
         auto t0 = clock::now();
 
-        // ── 1. 取出 LiDAR 帧 ──
+        // ── 1. 窥视（不弹出）LiDAR 帧 ──
+        // FIXME (Oracle 架构裁决): 对齐上游 sync_packages() 的 retry 语义——
+        // IMU 数据不够时只 return（帧留在 lidar_buf_ 里），不弹出、不丢弃，
+        // 下一次任意回调（IMU/LiDAR 到达）触发 process_frame() 时会重新
+        // 尝试同一帧。只有 IMU 数据集齐之后才真正 pop_front，此时帧数据
+        // 和 IMU 积分窗口才算"消费成功"，避免丢帧打断 IMU 积分连续性。
         sensor_msgs::msg::PointCloud2::SharedPtr lidar_msg;
         {
             std::lock_guard<std::mutex> lock(lidar_buf_mutex_);
             if (lidar_buf_.empty()) return;
-            lidar_msg = lidar_buf_.front();
-            lidar_buf_.pop_front();
+            lidar_msg = lidar_buf_.front();  // 窥视，暂不 pop
         }
 
         // ── 2. 预处理: ROS PointCloud2 → PointCloudT (raw) ──
@@ -409,6 +423,9 @@ private:
         if (raw_cloud->empty()) {
             RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 2000,
                 "Empty point cloud after preprocessing");
+            // 空点云无法恢复，此帧真正丢弃（非 IMU 未就绪的可重试场景）
+            std::lock_guard<std::mutex> lock(lidar_buf_mutex_);
+            if (!lidar_buf_.empty()) lidar_buf_.pop_front();
             return;
         }
 
@@ -428,15 +445,10 @@ private:
 
         {
             std::lock_guard<std::mutex> lock(imu_buf_mutex_);
-            // FIXME: IMU 窗口必须从 last_prop_end_time_ 往前取，而不是 frame_beg。
-            // 当处理时间 > 1/LiDAR_rate 时，lidar_buf_ 会 pop_front 丢帧。
-            // 丢帧导致 frame_beg 与 last_prop_end_time_ 之间存在 N × 100ms 的 gap，
-            // 这段 gap 的 IMU 数据不在 [frame_beg-margin, frame_end+margin] 窗口内，
-            // 导致 undistort_pcl 用 last_imu_ 零阶保持填充该 gap（100-200ms 量级），
-            // 高速行走时累计约 5-10° 姿态误差，足以让全部下采样点匹配失败。
-            // 修复：取 imu_buf_ 中所有 <= frame_end+margin 的样本，由
-            // undistort_pcl 内部的 prop_beg_time 门控自动跳过早于上帧末的部分。
-            // imu_buf_ 已限制最多保留2秒，不会引入过量数据。
+            // IMU 窗口取所有 <= frame_end+margin 的样本（不设下界），由
+            // undistort_pcl 内部的 prop_beg_time 门控自动跳过早于上帧末
+            // （last_prop_end_time_）的部分，从而覆盖 [last_prop_end_time_,
+            // frame_end] 的完整积分区间，不依赖 frame_beg 本身。
             const double margin = 0.02;
             meas.imu.reserve(512);
             for (size_t i = 0; i < imu_buf_.size(); ++i) {
@@ -445,12 +457,23 @@ private:
                     meas.imu.push_back(imu);
                 }
             }
+            // IMU 还没追上这一帧的结束时间：不丢帧，直接 return 重试
+            // （帧还在 lidar_buf_.front()，下次任意回调触发时会重新窥视）。
+            if (imu_buf_.empty() || imu_buf_.back().timestamp < frame_end + margin) {
+                return;
+            }
             if (meas.imu.size() < 2) {
                 RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 2000,
                     "Insufficient IMU data (%zu samples) for frame [%.3f, %.3f]",
                     meas.imu.size(), frame_beg, frame_end);
                 return;
             }
+        }
+
+        // IMU 数据已集齐，正式消费这一帧
+        {
+            std::lock_guard<std::mutex> lock(lidar_buf_mutex_);
+            if (!lidar_buf_.empty()) lidar_buf_.pop_front();
         }
 
         // ── 4. IMU 去畸变 ──
