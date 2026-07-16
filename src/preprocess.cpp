@@ -91,13 +91,17 @@ void Preprocess::odin1_handler(const sensor_msgs::msg::PointCloud2::ConstSharedP
         std::memcpy(&offset_time, base + off_offset_time, sizeof(offset_time));
 
         // 4. 转换到统一 PointType
-        // curvature 复用为帧内时间偏移（毫秒），遵循 FAST-LIO2 约定
+        // FIXME: Odin1 dToF 是全局曝光面阵传感器（同 L515），所有像素同时曝光，
+        // 不存在逐点扫描时间差。驱动层虚构的 offset_time（group/ODR，量纲是
+        // rate 不是时间）不能用于运动去畸变——用了等价于把旋转向量乘了一个随机
+        // 幅值，运动中点云被"拧成麻花"，导致 zero feature。
+        // 正确做法与 L515 路径（preprocess.cpp:129）一致：curvature = 0。
         PointType pt;
         pt.x         = x;
         pt.y         = y;
         pt.z         = z;
         pt.intensity = static_cast<float>(intensity);
-        pt.curvature = offset_time * 1000.0f;  // 秒 → 毫秒
+        pt.curvature = 0.0f;  // 全局曝光面阵，无帧内时间偏移（同 L515 路径）
         out->push_back(pt);
     }
 

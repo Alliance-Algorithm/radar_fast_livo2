@@ -428,12 +428,20 @@ private:
 
         {
             std::lock_guard<std::mutex> lock(imu_buf_mutex_);
+            // FIXME: IMU 窗口必须从 last_prop_end_time_ 往前取，而不是 frame_beg。
+            // 当处理时间 > 1/LiDAR_rate 时，lidar_buf_ 会 pop_front 丢帧。
+            // 丢帧导致 frame_beg 与 last_prop_end_time_ 之间存在 N × 100ms 的 gap，
+            // 这段 gap 的 IMU 数据不在 [frame_beg-margin, frame_end+margin] 窗口内，
+            // 导致 undistort_pcl 用 last_imu_ 零阶保持填充该 gap（100-200ms 量级），
+            // 高速行走时累计约 5-10° 姿态误差，足以让全部下采样点匹配失败。
+            // 修复：取 imu_buf_ 中所有 <= frame_end+margin 的样本，由
+            // undistort_pcl 内部的 prop_beg_time 门控自动跳过早于上帧末的部分。
+            // imu_buf_ 已限制最多保留2秒，不会引入过量数据。
             const double margin = 0.02;
-            meas.imu.reserve(256);
+            meas.imu.reserve(512);
             for (size_t i = 0; i < imu_buf_.size(); ++i) {
                 const auto& imu = imu_buf_[i];
-                if (imu.timestamp >= frame_beg - margin
-                    && imu.timestamp <= frame_end + margin) {
+                if (imu.timestamp <= frame_end + margin) {
                     meas.imu.push_back(imu);
                 }
             }

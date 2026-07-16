@@ -92,7 +92,13 @@ radar_fast_livo2_node:
     patch_pyramid_level: 4
 
     # ── 地图管理 ────────────────────────────────────────────────
-    filter_size_surf: 0.1      # 特征点降采样体素大小 (m)
+    # FIXME: 0.1m 在运动探索新区域时下采样点数冲到 11-12k（大量新 voxel），
+    # UpdateVoxelMap 单帧耗时 100-180ms + ICP 100-200ms，总帧时 300-450ms
+    # 远超 LiDAR 10Hz(100ms) 周期，导致 lidar_buf_ 持续丢帧——这是运动发散
+    # 的直接诱因（配合 IMU 窗口 bug，见 livmapper_node.cpp process_frame()
+    # 里 meas.imu 采集处的 FIXME）。0.2m 把下采样点数压到 3-4k 量级，
+    # UpdateVoxelMap/ICP 耗时同比下降，帧时可控制在 150ms 内，不再持续丢帧。
+    filter_size_surf: 0.2      # 特征点降采样体素大小 (m)
     filter_size_map: 0.15      # ikd-Tree 地图降采样体素大小 (m)
     cube_side_length: 1000.0   # ikd-Tree 局部地图立方体边长 (m)
 
