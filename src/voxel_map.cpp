@@ -566,18 +566,21 @@ void VoxelMapManager::StateEstimation(StatesGroup& state_propagat) {
                 (I_STATE.block<DIM_STATE, DIM_STATE>(0, 0) - G.block<DIM_STATE, DIM_STATE>(0, 0))
                 * state_.cov.block<DIM_STATE, DIM_STATE>(0, 0);
 
-            // FIXME: 数值保护：有效特征数很大时 G 可能接近单位阵，(I-G) 接近零矩阵，
-            // 连续多帧乘积 + 浮点误差会让 cov 出现负/近零特征值甚至丢失
-            // 对称性，导致后续 .inverse() 求 K_1 时数值爆炸（对应实测 frame
-            // 234+ 静止发散链路里 ESIKF 数值失稳的最后一环）。这里强制对称化
-            // 并给对角线加最小方差地板，防止协方差矩阵退化为不可逆或病态。
+            // FIXME (Oracle 架构裁决，移除对角线地板 kMinCovDiag): 此前认为
+            // 需要给 cov 对角线加最小方差地板防止病态，但当时的真实病根是
+            // imu_processing.cpp 里 last_prop_end_time_ 初始为 0 导致首帧
+            // 800+ 步协方差传播叠加（已修复，见该文件相关 FIXME），协方差
+            // 被異常放大后才在 (I-G)*P 的浮点运算里出现对称性丢失。地板值
+            // 只是把病态结果强行拉回一个"看起来合理"的数，不解决真实病根，
+            // 且上游 FAST-LIVO2 的 (I-G)*P 公式本身不做任何地板/裁剪——留
+            // 着地板等于在数值层面掩盖问题，一旦未来又出现真实的协方差病
+            // 态，这行代码会把它悄悄藏起来而不是报错/发散暴露出来。对称化
+            // 保留：(I-G)*P 理论上必然对称，这里只是修正浮点乘法的舍入
+            // 误差，是标准数值实践，不属于"掩盖"，与上游行为等价（上游没
+            // 显式写但用的矩阵库对同一运算的舍入误差量级相同，不影响结果）。
             state_.cov.block<DIM_STATE, DIM_STATE>(0, 0) =
                 0.5 * (state_.cov.block<DIM_STATE, DIM_STATE>(0, 0)
                      + state_.cov.block<DIM_STATE, DIM_STATE>(0, 0).transpose());
-            constexpr double kMinCovDiag = 1e-12;
-            for (int d = 0; d < DIM_STATE; ++d) {
-                if (state_.cov(d, d) < kMinCovDiag) state_.cov(d, d) = kMinCovDiag;
-            }
 
             position_last_ = state_.pos_end;
             EKF_stop_flg   = true;

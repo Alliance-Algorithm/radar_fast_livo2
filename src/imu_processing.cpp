@@ -112,8 +112,18 @@ bool ImuProcess::process(MeasureGroup& meas, StatesGroup& state,
     // ── 静止初始化：累积 IMU 数据，估计重力方向与零偏 ──
     if (imu_need_init_) {
         imu_init(meas, state);
-        // 保存最后一帧 IMU，用于下一帧的跨帧桥接
-        if (!meas.imu.empty()) { last_imu_ = meas.imu.back(); }
+        if (!meas.imu.empty()) {
+            last_imu_ = meas.imu.back();
+            // FIXME: last_prop_end_time_ 初始值为 0。若不在此处更新，init
+            // 期间积累的全部 IMU 数据（最多 2s × 400Hz = 800 个）会在第一次
+            // 调用 undistort_pcl 时被完整地跑过一遍协方差传播——因为
+            // prop_beg_time=0 导致 `tail.timestamp < prop_beg_time` 门控
+            // 永远为 false（实际时间戳都是 ~7910s），800 步 cov 叠加让
+            // state.cov 起点膨胀数百倍，后续 ESIKF 修正效果大幅变差。
+            // 修复：把传播锚点推进到 init 最后一个 IMU 时间戳，这样第一次
+            // undistort_pcl 只处理当前帧的 ~40 个新样本，与上游行为对齐。
+            last_prop_end_time_ = meas.imu.back().timestamp;
+        }
         return false;
     }
 

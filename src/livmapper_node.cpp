@@ -321,8 +321,16 @@ private:
                       msg->angular_velocity.y,
                       msg->angular_velocity.z};
             imu_buf_.push_back(d);
+            // FIXME (Oracle 架构裁决): 固定 2s wall-clock 窗口对齐上游"处理
+            // 完就 pop"语义后发现有隐患——若处理卡顿超过 2s（比如探索大片
+            // 新区域时 UpdateVoxelMap 耗时飙升），会把 imu_process_ 尚未消
+            // 费到的样本一起裁掉，造成永久积分 gap（等价于强行丢帧，且比
+            // 显式丢帧更隐蔽）。改为按 imu_process_.last_prop_end_time()
+            // 裁剪：只删已经被 undistort_pcl 消费过的样本，留一点 margin
+            // 防止 undistort_pcl 内部桥接用的 last_imu_ 被误删。
+            const double consumed_before = imu_process_.last_prop_end_time() - 0.1;
             auto it = imu_buf_.begin();
-            while (it != imu_buf_.end() && (d.timestamp - it->timestamp) > 2.0) ++it;
+            while (it != imu_buf_.end() && it->timestamp < consumed_before) ++it;
             if (it != imu_buf_.begin()) imu_buf_.erase(imu_buf_.begin(), it);
         }
         // 若上一帧因 IMU 未追上而挂在 lidar_buf_ 里等待重试，这里顺带

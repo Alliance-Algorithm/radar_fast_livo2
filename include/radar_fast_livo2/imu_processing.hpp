@@ -44,6 +44,13 @@ public:
     void set_imu_init_frame_num(int n) { init_imu_num = n; }
     void reset();
 
+    // 已消费到的传播锚点（上一次 undistort_pcl/imu_init 结束时刻）。
+    // 调用方用它来裁剪 imu_buf_：早于此时刻的样本已被消费，不会再被
+    // undistort_pcl 用到（其内部 prop_beg_time 门控会直接 continue 跳过），
+    // 可安全丢弃。比固定 wall-clock 窗口更贴近上游"处理完就 pop"的语义,
+    // 也避免处理卡顿超过固定窗口时误删尚未消费的 IMU 数据。
+    double last_prop_end_time() const { return last_prop_end_time_; }
+
     bool   imu_en         = true;
     int    init_imu_num   = 20;      // 静止初始化需要的 Lidar 帧数（非 IMU 样本数）
     bool   gravity_align  = true;    // 是否对齐重力方向
