@@ -127,3 +127,9 @@ radar_fast_livo2_node:
     pcd_save_en: true
     pcd_save_interval: -1      # -1 = 建图结束时统一保存；注意内存占用（长时间建图会积累巨量点）
     map_save_path: "/workspace/model/generated/fast_livo2_map.pcd"
+    map_save_trigger: "/tmp/fast_livo2_save_map"  # odin-map-save 触发文件路径
+    # 跳过前 N 帧的地图累积：首帧建图后 voxel map 平面约束稀疏，接下来
+    # 几帧 ESIKF 还在收敛（实测 residual 从 0.024 降到 0.019 约需 5-7 帧），
+    # 若从这几帧就开始累积会在导出地图里留下从传感器原点发散的"射线"
+    # 伪影（静止时最明显）。30 帧 @ ~10Hz ≈ 3s，留足收敛余量。
+    pcd_save_warmup_frames: 30

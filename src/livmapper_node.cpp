@@ -175,6 +175,19 @@ private:
         declare_parameter("pcd_save_interval", -1);
         declare_parameter("map_save_path",    std::string("/tmp/fast_livo2_map.pcd"));
         declare_parameter("map_save_trigger", std::string("/tmp/fast_livo2_save_map"));
+        // FIXME: 首帧 BuildVoxelMap 后，voxel map 里的平面约束还很稀疏，
+        // 接下来几帧 ESIKF 还在收敛（实测 frame2→frame7 average residual
+        // 从 0.0236 单调降到 0.0189，effective feature 从 2168 涨到 2673），
+        // state_.pos_end/rot_end 在这几帧里逐帧微调。若从 frame2 就开始
+        // 累积 pcd_accumulated_，同一块静止表面会用几个还没收敛、逐帧变化
+        // 的位姿投影到世界系，叠加起来在导出地图里表现为从传感器原点发散
+        // 出去的"射线"伪影（静止测试时最明显，因为设备没动，射线不会被
+        // 运动带来的新视角覆盖/稀释掉）。跳过前 N 帧的地图累积，等 ESIKF
+        // 收敛稳定后才开始记录永久地图，从根源上避免这类伪影而不是靠
+        // 后处理（voxel 降采样对射线伪影效果有限——射线上的点在空间上本
+        // 就稀疏分散，不会被同一个体素的去重命中；离群点剔除倒是能清掉
+        // 大部分，但会连带损失一些正常的稀疏区域点，不如从源头避免）。
+        declare_parameter("pcd_save_warmup_frames", 30);
     }
 
     void load_parameters() {
@@ -275,9 +288,10 @@ private:
         voxel_map_.extT_ = t_li;
 
         // PCD
-        pcd_save_en_       = get_parameter("pcd_save_en").as_bool();
-        map_save_path_     = get_parameter("map_save_path").as_string();
-        save_trigger_path_ = get_parameter("map_save_trigger").as_string();
+        pcd_save_en_          = get_parameter("pcd_save_en").as_bool();
+        map_save_path_        = get_parameter("map_save_path").as_string();
+        save_trigger_path_    = get_parameter("map_save_trigger").as_string();
+        pcd_save_warmup_frames_ = get_parameter("pcd_save_warmup_frames").as_int();
 
         RCLCPP_INFO(get_logger(), "LiDAR topic: %s", lidar_topic_.c_str());
         RCLCPP_INFO(get_logger(), "IMU   topic: %s", imu_topic_.c_str());
@@ -634,7 +648,10 @@ private:
         publish_tf(lidar_msg->header.stamp);
 
         // ── 15. PCD 累积 ──
-        if (pcd_save_en_) {
+        // frame_count_ 在本函数末尾才自增，此处判断时它仍是"已完成的帧数"
+        // （BuildVoxelMap 的首帧不计入 frame_count_，故 frame_count_==0
+        // 对应 process_frame 里真正跑 ESIKF 的第 1 帧，即日志里的 frame 1）。
+        if (pcd_save_en_ && frame_count_ >= pcd_save_warmup_frames_) {
             for (const auto& pt : world_lidar->points) {
                 pcd_accumulated_.points.push_back(pt);
             }
@@ -786,6 +803,7 @@ private:
     std::string map_save_path_;
     std::string save_trigger_path_ = "/tmp/fast_livo2_save_map";
     rclcpp::TimerBase::SharedPtr save_trigger_timer_;
+    int pcd_save_warmup_frames_ = 30;
 
     Preprocess  preprocess_;
     ImuProcess  imu_process_;
