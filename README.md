@@ -175,14 +175,6 @@ IMU 样本的时间戳。
 "体素内取质心"变成"体素内取首个点"——对大多数 SLAM 场景精度影响可
 忽略，换来的是编译期就能规避掉一整类运行时 ABI 崩溃。
 
-## 已知限制
-
-- VIO（视觉直接法）代码完整但未在真实相机硬件上测试
-- 相机-LiDAR 外参标定流程未验证（需要外部工具，如
-  [direct_visual_lidar_calibration](https://github.com/koide3/direct_visual_lidar_calibration)）
-- 手写体素降采样是"取首点"而非"取质心"，对精度要求极高的场景可能需要
-  换回质心策略（`config/*.yaml` 里的 `filter_size_surf` 相应调整）
-
 ## 致谢
 
 基于 [hku-mars/FAST-LIVO2](https://github.com/hku-mars/FAST-LIVO2)
