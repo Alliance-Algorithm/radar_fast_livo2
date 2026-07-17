@@ -28,14 +28,10 @@ radar_fast_livo2_node:
     imu_en: true
     init_imu_num: 20           # 静止初始化所需 IMU 帧数（400Hz下约50ms）
     # 陀螺仪/加速度计噪声协方差 (per sqrt(Hz))——白噪声谱密度。
-    # Allan 方差静止30min实测值（ARW/VRW）给出理论下限 gyr:2e-8 acc:6.4e-7，
-    # 但 Allan 静止标定不捕获动态误差源（比例因子误差、g敏感性、外参残差、
-    # 去畸变残差等），这些误差项只在实际运动中才出现，直接用理论下限会让
-    # 滤波器过于信任 IMU、抑制 LiDAR 修正（实测：静止完美但运动瞬间发散）。
-    # 0.01 是三轮判别测试（2e-8/1e-3/0.01）里静止漂移最好的一档，运动发散
-    # 问题已确认根因在别处（见下方 UpdateVoxelMap 相关注释），不再是此参数。
-    gyr_cov: 0.01
-    acc_cov: 0.01
+    # 0.005：在静态漂移和转弯鲁棒性之间折中。太低（0.001）转弯时
+    # IMU 死推算过紧，旋转误差累积后 LiDAR 修正不够快。
+    gyr_cov: 0.005
+    acc_cov: 0.005
     # bias 随机游走协方差（bias 变化速率）。对齐官方 FAST-LIVO2 硬编码值
     # 0.0001（LIVMapper.cpp set_gyr_bias_cov/set_acc_bias_cov）。
     # Allan 方差实测值（gyr:5e-10, acc:2.75e-7）过小，导致滤波器无法追踪
@@ -98,7 +94,7 @@ radar_fast_livo2_node:
     # 的直接诱因（配合 IMU 窗口 bug，见 livmapper_node.cpp process_frame()
     # 里 meas.imu 采集处的 FIXME）。0.2m 把下采样点数压到 3-4k 量级，
     # UpdateVoxelMap/ICP 耗时同比下降，帧时可控制在 150ms 内，不再持续丢帧。
-    filter_size_surf: 0.2      # 特征点降采样体素大小 (m)
+    filter_size_surf: 0.15     # 特征点降采样体素大小 (m)。0.2→0.15：转弯时跨视角匹配需要更多特征
     filter_size_map: 0.15      # ikd-Tree 地图降采样体素大小 (m)
     cube_side_length: 1000.0   # ikd-Tree 局部地图立方体边长 (m)
 
