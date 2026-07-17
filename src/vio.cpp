@@ -644,6 +644,18 @@ void VIOManager::processFrame(const cv::Mat& img,
 
     retrieveFromVisualSparseMap(img, pg, plane_map);
     computeJacobianAndUpdateEKF(img);
+
+    // FIXME (CodeRabbit review): computeJacobianAndUpdateEKF 会原地修改
+    // state_（光度 EKF 修正），但下面三步生成/更新的视觉地图点都要用
+    // 相机-世界变换 Rcw_/Pcw_ 把 3D 点投影到图像。若不在这里用修正后的
+    // state_ 重新算一遍 Rcw_/Pcw_，新生成的视觉地图点会绑定到 EKF 修正前
+    // 的过期位姿，与最终写回的 ESIKF 状态不一致，导致视觉地图逐帧累积
+    // 一个恒定的位姿偏移。
+    const M3D Rwi_updated = state_->rot_end;
+    const V3D Pwi_updated = state_->pos_end;
+    Rcw_ = Rci_ * Rwi_updated.transpose();
+    Pcw_ = -Rci_ * Rwi_updated.transpose() * Pwi_updated + Pci_;
+
     generateVisualMapPoints(img, pg);
     updateVisualMapPoints(img);
     updateReferencePatch(plane_map);
