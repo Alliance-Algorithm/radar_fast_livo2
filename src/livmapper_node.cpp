@@ -49,7 +49,7 @@
 #include <limits>
 #include <mutex>
 #include <string>
-#include <fstream>
+#include <filesystem>
 #include <chrono>
 
 namespace radar::fast_livo2 {
@@ -62,6 +62,17 @@ public:
         load_parameters();
         init_subscribers();
         init_publishers();
+        // HACK: 手动 SLAM 保存触发用轮询文件（约定同 Odin1 厂商驱动的
+        // "echo 'set save_map 1' > /tmp/odin_command.txt"），而非 ROS2
+        // Service/信号处理器——PCL 的 savePCDFileBinary 内部有动态内存
+        // 分配和文件 IO，在 POSIX signal handler（如 SIGUSR1）里直接调用
+        // 是未定义行为（分配器不是异步信号安全的），必须放到普通执行路径
+        // 里跑。用 1Hz 定时器轮询触发文件比信号处理器更安全，也比新增
+        // Service 接口更轻量（.script/odin-map-save 直接 touch 文件即可，
+        // 不需要额外的 ROS2 client 依赖）。
+        save_trigger_timer_ = create_wall_timer(std::chrono::seconds(1), [this]() {
+            check_save_trigger();
+        });
         RCLCPP_INFO(get_logger(), "radar_fast_livo2 node started (mode=%d)", slam_mode_);
     }
 
@@ -163,6 +174,7 @@ private:
         declare_parameter("pcd_save_en",      false);
         declare_parameter("pcd_save_interval", -1);
         declare_parameter("map_save_path",    std::string("/tmp/fast_livo2_map.pcd"));
+        declare_parameter("map_save_trigger", std::string("/tmp/fast_livo2_save_map"));
     }
 
     void load_parameters() {
@@ -263,8 +275,9 @@ private:
         voxel_map_.extT_ = t_li;
 
         // PCD
-        pcd_save_en_    = get_parameter("pcd_save_en").as_bool();
-        map_save_path_  = get_parameter("map_save_path").as_string();
+        pcd_save_en_       = get_parameter("pcd_save_en").as_bool();
+        map_save_path_     = get_parameter("map_save_path").as_string();
+        save_trigger_path_ = get_parameter("map_save_trigger").as_string();
 
         RCLCPP_INFO(get_logger(), "LiDAR topic: %s", lidar_topic_.c_str());
         RCLCPP_INFO(get_logger(), "IMU   topic: %s", imu_topic_.c_str());
@@ -731,8 +744,33 @@ private:
             RCLCPP_INFO(get_logger(),
                 "Saving %ld points to %s",
                 pcd_accumulated_.points.size(), map_save_path_.c_str());
-            pcl::io::savePCDFileASCII(map_save_path_, pcd_accumulated_);
-            RCLCPP_INFO(get_logger(), "PCD saved.");
+            // HACK: 从 ASCII 换成 Binary——长时间建图累积到百万级点时，
+            // ASCII 每点一行文本格式化 I/O 耗时和文件体积都数倍于 binary，
+            // 手动触发保存场景下用户在等这个操作完成，不该让格式选择成为
+            // 瓶颈。Foxglove/PCL/CloudCompare 等下游工具都原生支持读取
+            // binary PCD，不存在兼容性代价。
+            pcl::io::savePCDFileBinary(map_save_path_, pcd_accumulated_);
+            RCLCPP_INFO(get_logger(), "PCD saved (%ld points, binary).",
+                pcd_accumulated_.points.size());
+        } else if (pcd_save_en_) {
+            RCLCPP_WARN(get_logger(), "PCD save requested but no points accumulated yet.");
+        }
+    }
+
+    // 检查 map_save_path_ 同目录下是否存在触发文件（.script/odin-map-save
+    // 负责 touch 它），存在则立即保存当前累积点云并删除触发文件（避免
+    // 下一轮定时器重复触发）。不停止建图，保存完继续累积。
+    void check_save_trigger() {
+        namespace fs = std::filesystem;
+        const fs::path trigger_path = save_trigger_path_;
+        std::error_code ec;
+        if (!fs::exists(trigger_path, ec) || ec) { return; }
+        RCLCPP_INFO(get_logger(), "Save-map trigger detected, saving current map...");
+        save_pcd();
+        fs::remove(trigger_path, ec);
+        if (ec) {
+            RCLCPP_WARN(get_logger(), "Failed to remove save-map trigger file: %s",
+                ec.message().c_str());
         }
     }
 
@@ -746,6 +784,8 @@ private:
     double filter_size_surf_ = 0.1;
     bool   pcd_save_en_     = false;
     std::string map_save_path_;
+    std::string save_trigger_path_ = "/tmp/fast_livo2_save_map";
+    rclcpp::TimerBase::SharedPtr save_trigger_timer_;
 
     Preprocess  preprocess_;
     ImuProcess  imu_process_;
