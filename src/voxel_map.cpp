@@ -780,31 +780,23 @@ void VoxelMapManager::BuildResidualListOMP(
             double prob    = 0.0;
             build_single_residual(pv, current_octo, 0, is_sucess, prob, single_ptpl);
 
-            // 若当前体素未匹配成功，尝试相邻体素
+            // 若当前体素未匹配成功，尝试全部 26 邻域
+            // （原版只检查点的偏置方向 1-3 个体素，转弯时视角剧烈变化
+            //  新体素还没稳定平面，需扩大搜索范围找邻近已稳定的体素）
             if (!is_sucess) {
-                VOXEL_LOCATION near_position = position;
-                if (pv.point_w[0] > (current_octo->voxel_center_[0] + current_octo->quater_length_)) {
-                    near_position.x = near_position.x + 1;
-                } else if (pv.point_w[0]
-                    < (current_octo->voxel_center_[0] - current_octo->quater_length_)) {
-                    near_position.x = near_position.x - 1;
-                }
-                if (pv.point_w[1] > (current_octo->voxel_center_[1] + current_octo->quater_length_)) {
-                    near_position.y = near_position.y + 1;
-                } else if (pv.point_w[1]
-                    < (current_octo->voxel_center_[1] - current_octo->quater_length_)) {
-                    near_position.y = near_position.y - 1;
-                }
-                if (pv.point_w[2] > (current_octo->voxel_center_[2] + current_octo->quater_length_)) {
-                    near_position.z = near_position.z + 1;
-                } else if (pv.point_w[2]
-                    < (current_octo->voxel_center_[2] - current_octo->quater_length_)) {
-                    near_position.z = near_position.z - 1;
-                }
-                auto iter_near = voxel_map_.find(near_position);
-                if (iter_near != voxel_map_.end()) {
-                    build_single_residual(
-                        pv, iter_near->second.get(), 0, is_sucess, prob, single_ptpl);
+                for (int dx = -1; dx <= 1 && !is_sucess; ++dx) {
+                    for (int dy = -1; dy <= 1 && !is_sucess; ++dy) {
+                        for (int dz = -1; dz <= 1 && !is_sucess; ++dz) {
+                            if (dx == 0 && dy == 0 && dz == 0) continue;
+                            VOXEL_LOCATION near_position(
+                                position.x + dx, position.y + dy, position.z + dz);
+                            auto iter_near = voxel_map_.find(near_position);
+                            if (iter_near != voxel_map_.end()) {
+                                build_single_residual(
+                                    pv, iter_near->second.get(), 0, is_sucess, prob, single_ptpl);
+                            }
+                        }
+                    }
                 }
             }
 

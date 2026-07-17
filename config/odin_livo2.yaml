@@ -94,8 +94,8 @@ radar_fast_livo2_node:
     # 的直接诱因（配合 IMU 窗口 bug，见 livmapper_node.cpp process_frame()
     # 里 meas.imu 采集处的 FIXME）。0.2m 把下采样点数压到 3-4k 量级，
     # UpdateVoxelMap/ICP 耗时同比下降，帧时可控制在 150ms 内，不再持续丢帧。
-    filter_size_surf: 0.15     # 特征点降采样体素大小 (m)。0.2→0.15：转弯时跨视角匹配需要更多特征
-    filter_size_map: 0.15      # ikd-Tree 地图降采样体素大小 (m)
+    filter_size_surf: 0.15     # 特征点降采样体素大小 (m)
+    filter_size_map: 0.1       # ikd-Tree 地图降采样体素大小 (m)，更密→更多定位约束
     cube_side_length: 1000.0   # ikd-Tree 局部地图立方体边长 (m)
 
     # ── Voxel Map 参数 ──────────────────────────────────────────
