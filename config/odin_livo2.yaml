@@ -120,8 +120,8 @@ radar_fast_livo2_node:
     voxel_map/sliding_thresh: 8.0
 
     # ── 地图保存 ────────────────────────────────────────────────
-    pcd_save_en: true
-    pcd_save_interval: -1      # -1 = 建图结束时统一保存；注意内存占用（长时间建图会积累巨量点）
+    pcd_save_en: true           # 开启地图累积
+    pcd_save_interval: 100      # 每100帧(~10s)刷盘并清内存，防OOM；-1=攒到底
     map_save_path: "/workspace/model/generated/fast_livo2_map.pcd"
     map_save_trigger: "/tmp/fast_livo2_save_map"  # odin-map-save 触发文件路径
     # 跳过前 N 帧的地图累积：首帧建图后 voxel map 平面约束稀疏，接下来

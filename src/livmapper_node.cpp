@@ -309,6 +309,7 @@ private:
 
         // PCD
         pcd_save_en_          = get_parameter("pcd_save_en").as_bool();
+        pcd_save_interval_    = get_parameter("pcd_save_interval").as_int();
         map_save_path_        = get_parameter("map_save_path").as_string();
         save_trigger_path_    = get_parameter("map_save_trigger").as_string();
         pcd_save_warmup_frames_ = get_parameter("pcd_save_warmup_frames").as_int();
@@ -667,13 +668,29 @@ private:
         // ── 14. 发布 TF ──
         publish_tf(lidar_msg->header.stamp);
 
-        // ── 15. PCD 累积 ──
-        // frame_count_ 在本函数末尾才自增，此处判断时它仍是"已完成的帧数"
-        // （BuildVoxelMap 的首帧不计入 frame_count_，故 frame_count_==0
-        // 对应 process_frame 里真正跑 ESIKF 的第 1 帧，即日志里的 frame 1）。
+        // ── 15. PCD 累积 + 定期刷盘 ──
         if (pcd_save_en_ && frame_count_ >= pcd_save_warmup_frames_) {
             for (const auto& pt : world_lidar->points) {
                 pcd_accumulated_.points.push_back(pt);
+            }
+            // 定期刷盘：每 pcd_save_interval_ 帧保存一次，清空内存防 OOM
+            if (pcd_save_interval_ > 0) {
+                pcd_save_period_counter_++;
+                if (pcd_save_period_counter_ >= pcd_save_interval_) {
+                    pcd_save_period_counter_ = 0;
+                    std::string path = map_save_path_;
+                    auto dot = path.rfind(".pcd");
+                    if (dot != std::string::npos) {
+                        path.insert(dot, "." + std::to_string(pcd_save_seq_++));
+                    } else {
+                        path += "." + std::to_string(pcd_save_seq_++);
+                    }
+                    RCLCPP_INFO(get_logger(),
+                        "Periodic PCD save: %s (%ld points)", path.c_str(),
+                        pcd_accumulated_.points.size());
+                    pcl::io::savePCDFileBinary(path, pcd_accumulated_);
+                    pcd_accumulated_.clear();
+                }
             }
         }
 
@@ -822,6 +839,9 @@ private:
     double img_scale_       = 0.5;
     double filter_size_surf_ = 0.1;
     bool   pcd_save_en_     = false;
+    int    pcd_save_interval_ = -1;
+    int    pcd_save_seq_      = 0;
+    int    pcd_save_period_counter_ = 0;
     std::string map_save_path_;
     std::string save_trigger_path_ = "/tmp/fast_livo2_save_map";
     rclcpp::TimerBase::SharedPtr save_trigger_timer_;
