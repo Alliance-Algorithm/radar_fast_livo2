@@ -96,8 +96,8 @@ private:
         declare_parameter("confidence_threshold", 35);
 
         // SLAM mode: 1=ONLY_LIO, 2=LIVO
-        declare_parameter("slam_mode", static_cast<int>(SlamMode::LIVO));
-        declare_parameter("img_en",    true);
+        declare_parameter("slam_mode", static_cast<int>(SlamMode::ONLY_LIO));
+        declare_parameter("img_en",    false);
 
         // IMU
         declare_parameter("imu_en",           true);
@@ -218,7 +218,13 @@ private:
 
         // 外参加载
         auto ext_t = get_parameter("extrinsic_T").as_double_array();
+        if (ext_t.size() != 3) {
+            throw std::runtime_error("extrinsic_T must have exactly 3 elements, got " + std::to_string(ext_t.size()));
+        }
         auto ext_r = get_parameter("extrinsic_R").as_double_array();
+        if (ext_r.size() != 9) {
+            throw std::runtime_error("extrinsic_R must have exactly 9 elements, got " + std::to_string(ext_r.size()));
+        }
         Eigen::Vector3d t_li(ext_t[0], ext_t[1], ext_t[2]);
         Eigen::Matrix3d r_li;
         r_li << ext_r[0], ext_r[1], ext_r[2],
@@ -233,7 +239,13 @@ private:
         // ── VIOManager 初始化（仅 LIVO 模式）──
         if (img_en_) {
             auto pcl_ = get_parameter("Pcl").as_double_array();
+            if (pcl_.size() != 3) {
+                throw std::runtime_error("Pcl must have exactly 3 elements, got " + std::to_string(pcl_.size()));
+            }
             auto rcl_ = get_parameter("Rcl").as_double_array();
+            if (rcl_.size() != 9) {
+                throw std::runtime_error("Rcl must have exactly 9 elements, got " + std::to_string(rcl_.size()));
+            }
             V3D pcl(pcl_[0], pcl_[1], pcl_[2]);
             M3D rcl;
             rcl << rcl_[0], rcl_[1], rcl_[2],
@@ -259,6 +271,14 @@ private:
 
         // 降采样参数
         filter_size_surf_ = get_parameter("filter_size_surf").as_double();
+
+        // 参数合法性校验
+        if (preprocess_.point_filter_num <= 0) {
+            throw std::runtime_error("point_filter_num must be > 0");
+        }
+        if (filter_size_surf_ <= 0.0) {
+            throw std::runtime_error("filter_size_surf must be > 0");
+        }
 
         // ── VoxelMapConfig 初始化 ──
         voxel_config_.max_layer_         = get_parameter("voxel_map/max_layer").as_int();
@@ -471,14 +491,14 @@ private:
             double pt_time = frame_beg + raw_cloud->points[i].curvature / 1000.0;
             if (pt_time > frame_end) frame_end = pt_time;
         }
-        if (frame_end <= frame_beg) frame_end = frame_beg + 0.05;
+        if (frame_end <= frame_beg) frame_end = frame_beg + 0.005;
 
         MeasureGroup meas;
         meas.lidar_beg_time = frame_beg;
         meas.lidar_end_time = frame_end;
         meas.lidar = raw_cloud;
 
-        {
+        if (imu_process_.imu_en) {
             std::lock_guard<std::mutex> lock(imu_buf_mutex_);
             // IMU 窗口取所有 <= frame_end+margin 的样本（不设下界），由
             // undistort_pcl 内部的 prop_beg_time 门控自动跳过早于上帧末
@@ -621,7 +641,7 @@ private:
         // ── 9.5. VIO 光度更新（仅 LIVO 模式，且找到时间匹配的图像帧）──
         if (img_en_) {
             cv::Mat gray;
-            if (get_nearest_image(frame_end + img_time_offset_, gray)) {
+            if (get_nearest_image(frame_end, gray)) {
                 vio_manager_.state_          = &state_;
                 vio_manager_.state_propagat_ = &state_propagat;
                 vio_manager_.processFrame(gray, voxel_map_.pv_list_, voxel_map_.voxel_map_);
@@ -699,10 +719,12 @@ private:
         odom_msg.twist.twist.linear.y = state_.vel_end.y();
         odom_msg.twist.twist.linear.z = state_.vel_end.z();
 
-        // 协方差（仅报告 pose 6-DOF）
+        // 协方差: state 内部布局 [rot(0-2), pos(3-5)]，
+        // nav_msgs/Odometry 要求 [pos(0-2), rot(3-5)]，需重排。
+        constexpr std::array<int, 6> pose_idx{3, 4, 5, 0, 1, 2};
         for (int i = 0; i < 6; i++) {
             for (int j = 0; j < 6; j++) {
-                odom_msg.pose.covariance[i * 6 + j] = state_.cov(i, j);
+                odom_msg.pose.covariance[i * 6 + j] = state_.cov(pose_idx[i], pose_idx[j]);
             }
         }
         pub_odom_->publish(odom_msg);
@@ -793,8 +815,8 @@ private:
 
     // ── 成员变量 ─────────────────────────────────────────────────
     std::string lidar_topic_, imu_topic_, img_topic_;
-    int    slam_mode_ = SlamMode::LIVO;
-    bool   img_en_    = true;
+    int    slam_mode_ = SlamMode::ONLY_LIO;
+    bool   img_en_    = false;
     double img_time_offset_ = 0.0;
     double imu_time_offset_ = 0.0;
     double img_scale_       = 0.5;

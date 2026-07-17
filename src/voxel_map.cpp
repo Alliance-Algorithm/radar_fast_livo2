@@ -639,7 +639,8 @@ void VoxelMapManager::BuildVoxelMap() {
         calcBodyCov(point_this, static_cast<float>(config_setting_.dept_err_),
             static_cast<float>(config_setting_.beam_err_), var);
 
-        M3D point_crossmat = skewSym(point_this);
+        V3D point_imu = extR_ * point_this + extT_;
+        M3D point_crossmat = skewSym(point_imu);
 
         // world-frame 协方差: sensor noise + rotation uncertainty + translation uncertainty
         var = (state_.rot_end * extR_) * var * (state_.rot_end * extR_).transpose()
@@ -750,11 +751,10 @@ void VoxelMapManager::UpdateVoxelMap(const std::vector<pointWithVar>& input_poin
 void VoxelMapManager::BuildResidualListOMP(
     std::vector<pointWithVar>& pv_list, std::vector<PointToPlane>& ptpl_list) {
     double voxel_size = config_setting_.max_voxel_size_;
-    std::mutex mylock;
     ptpl_list.clear();
 
     std::vector<PointToPlane> all_ptpl_list(pv_list.size());
-    std::vector<bool> useful_ptpl(pv_list.size(), false);
+    std::vector<char> useful_ptpl(pv_list.size(), 0);
     std::vector<size_t> index(pv_list.size());
     for (size_t i = 0; i < index.size(); ++i)
         index[i] = i;
@@ -783,21 +783,21 @@ void VoxelMapManager::BuildResidualListOMP(
             // 若当前体素未匹配成功，尝试相邻体素
             if (!is_sucess) {
                 VOXEL_LOCATION near_position = position;
-                if (loc_xyz[0] > (current_octo->voxel_center_[0] + current_octo->quater_length_)) {
+                if (pv.point_w[0] > (current_octo->voxel_center_[0] + current_octo->quater_length_)) {
                     near_position.x = near_position.x + 1;
-                } else if (loc_xyz[0]
+                } else if (pv.point_w[0]
                     < (current_octo->voxel_center_[0] - current_octo->quater_length_)) {
                     near_position.x = near_position.x - 1;
                 }
-                if (loc_xyz[1] > (current_octo->voxel_center_[1] + current_octo->quater_length_)) {
+                if (pv.point_w[1] > (current_octo->voxel_center_[1] + current_octo->quater_length_)) {
                     near_position.y = near_position.y + 1;
-                } else if (loc_xyz[1]
+                } else if (pv.point_w[1]
                     < (current_octo->voxel_center_[1] - current_octo->quater_length_)) {
                     near_position.y = near_position.y - 1;
                 }
-                if (loc_xyz[2] > (current_octo->voxel_center_[2] + current_octo->quater_length_)) {
+                if (pv.point_w[2] > (current_octo->voxel_center_[2] + current_octo->quater_length_)) {
                     near_position.z = near_position.z + 1;
-                } else if (loc_xyz[2]
+                } else if (pv.point_w[2]
                     < (current_octo->voxel_center_[2] - current_octo->quater_length_)) {
                     near_position.z = near_position.z - 1;
                 }
@@ -809,15 +809,14 @@ void VoxelMapManager::BuildResidualListOMP(
             }
 
             if (is_sucess) {
-                std::lock_guard<std::mutex> lock(mylock);
-                useful_ptpl[i]   = true;
+                useful_ptpl[i]   = 1;
                 all_ptpl_list[i] = single_ptpl;
             }
         }
     }
 
     for (size_t i = 0; i < useful_ptpl.size(); i++) {
-        if (useful_ptpl[i]) ptpl_list.push_back(all_ptpl_list[i]);
+        if (useful_ptpl[i] != 0) ptpl_list.push_back(all_ptpl_list[i]);
     }
 }
 

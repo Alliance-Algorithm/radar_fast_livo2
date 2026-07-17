@@ -105,7 +105,7 @@ radar_fast_livo2_node:
     # ── Voxel Map 参数 ──────────────────────────────────────────
     voxel_map/max_layer: 2         # 面阵 dToF 小块平面需细分
     voxel_map/voxel_size: 0.5
-    voxel_map/planner_threshold: 0.01
+    voxel_map/min_eigen_value: 0.01
     voxel_map/layer_init_num: [3, 5, 5, 5, 5]  # 降低根层阈值
     # 点到平面接受阈值的 sigma 倍数，从默认 3.0 放宽到 4.5：大场景（数千
     # 有效特征）下 state 微小扰动会让部分点跌出 3σ 边界，effective feature

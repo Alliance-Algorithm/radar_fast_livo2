@@ -277,18 +277,17 @@ void ImuProcess::undistort_pcl(const MeasureGroup& meas, StatesGroup& state,
         double dt     = 0.0;
         double offs_t = 0.0;
 
+        const double effective_end = std::min(tail.timestamp, prop_end_time);
+        bool past_end = (tail.timestamp >= prop_end_time);
+
         if (head.timestamp < prop_beg_time) {
             // 跨传播边界的首个部分 IMU 区间
-            dt     = tail.timestamp - last_prop_end_time_;
-            offs_t = tail.timestamp - prop_beg_time;
-        } else if (i != v_imu.size() - 2) {
-            // 正常帧内 IMU 区间
-            dt     = tail.timestamp - head.timestamp;
-            offs_t = tail.timestamp - prop_beg_time;
+            dt     = effective_end - last_prop_end_time_;
+            offs_t = effective_end - prop_beg_time;
         } else {
-            // 最后一个 IMU 区间，截断到帧末
-            dt     = prop_end_time - head.timestamp;
-            offs_t = prop_end_time - prop_beg_time;
+            // 帧内 IMU 区间（含跨帧末截断）
+            dt     = effective_end - head.timestamp;
+            offs_t = effective_end - prop_beg_time;
         }
 
         // ── 协方差传播：F_x * P * F_x^T + cov_w（Oracle C2）──
@@ -330,6 +329,8 @@ void ImuProcess::undistort_pcl(const MeasureGroup& meas, StatesGroup& state,
         imu_pose_.push_back({});
         set_pose6d(imu_pose_.back(), offs_t, acc_imu, angvel_avr,
                    vel_imu, pos_imu, R_imu);
+
+        if (past_end) break;
     }
 
     // ── 4. 写回帧末状态（原地更新调用方持有的 state，闭环闭合）──
@@ -340,7 +341,12 @@ void ImuProcess::undistort_pcl(const MeasureGroup& meas, StatesGroup& state,
     state.rot_end = R_imu;
     state.pos_end = pos_imu;
 
-    last_imu_           = v_imu.back();
+    // 保存帧窗口内最后一个 IMU 样本（非 margin 样本）用于下帧桥接
+    size_t last_idx = v_imu.size() - 1;
+    while (last_idx > 0 && v_imu[last_idx].timestamp > prop_end_time) {
+        --last_idx;
+    }
+    last_imu_           = v_imu[last_idx];
     last_prop_end_time_ = prop_end_time;
 
     if (pcl_wait_proc_.points.size() < 1) { return; }

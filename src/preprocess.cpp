@@ -78,6 +78,8 @@ void Preprocess::odin1_handler(const sensor_msgs::msg::PointCloud2::ConstSharedP
         std::memcpy(&y, base + off_y, sizeof(y));
         std::memcpy(&z, base + off_z, sizeof(z));
 
+        if (!std::isfinite(x) || !std::isfinite(y) || !std::isfinite(z)) continue;
+
         // 2. 距离范围过滤
         const float r = std::sqrt(x * x + y * y + z * z);
         if (r < blind || r > max_range) continue;
@@ -119,6 +121,8 @@ void Preprocess::l515_handler(const sensor_msgs::msg::PointCloud2::ConstSharedPt
 
     for (std::size_t i = 0; i < raw.size(); ++i) {
         const auto& p = raw[i];
+
+        if (!std::isfinite(p.x) || !std::isfinite(p.y) || !std::isfinite(p.z)) continue;
 
         if ((point_count_++ % point_filter_num) != 0) continue;
 

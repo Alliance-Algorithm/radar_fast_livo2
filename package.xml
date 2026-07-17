@@ -4,7 +4,7 @@
   <name>radar_fast_livo2</name>
   <version>0.0.1</version>
   <description>FAST-LIVO2 LiDAR-IMU-Visual odometry adapted for Odin1 dToF + HIK camera (ROS2 port)</description>
-  <maintainer email="huangziang_2024@qq.com">Your Name</maintainer>
+  <maintainer email="huangziang_2024@qq.com">Yukikaze2233</maintainer>
   <license>GPL-2.0</license>
 
   <buildtool_depend>ament_cmake</buildtool_depend>
