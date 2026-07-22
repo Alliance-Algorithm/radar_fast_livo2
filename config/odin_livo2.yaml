@@ -9,13 +9,23 @@ radar_fast_livo2_node:
     # ── Topics ──────────────────────────────────────────────────
     lidar_topic: "/odin1/cloud_raw"
     imu_topic:   "/odin1/imu"
-    img_topic:   "/camera/image_raw"   # HIK 相机驱动发布的 topic，按实际改
 
     # ── SLAM 模式 ───────────────────────────────────────────────
     # 1 = ONLY_LIO（先跑通这个，验证 Odin1 适配无误）
     # 2 = LIVO（LiDAR+IMU+Camera 完整融合，第二阶段再开）
     slam_mode: 1
     img_en: false
+
+    # ── Camera SHM（仅 LIVO 模式） ──────────────────────────────
+    # 不再使用 ROS Image topic；相机数据通过 hikcamera_sdk 的 POSIX 共享内存
+    # (SharedFrameReader) 直接读取。shm_name 需与 hikcamera_ros_driver /
+    # SharedFrameWriter 的 SHM 段名一致。
+    camera/shm_name: "/hikcamera_shm"
+    # img_time_offset: 相机帧时间戳（std::chrono::steady_clock 域）与
+    # Odin 设备时钟域之间的整体平移。host_monotonic_ns 不是 Odin 时钟，
+    # LIVO 模式下两者不在同一时钟域，offset 必须实测标定，默认 0.0 仅为占位。
+    # 不使用 device_timestamp_ticks 做时间转换。
+    img_time_offset: 0.0
 
     # ── Odin1 dToF 预处理 ───────────────────────────────────────
     lidar_type: 5              # ODIN1（见 common_lib.hpp LidarType 枚举）
@@ -41,16 +51,10 @@ radar_fast_livo2_node:
     gyr_bias_cov: 0.0001
     acc_bias_cov: 0.0001
 
-    # imu_time_offset / img_time_offset: 跨传感器整体时间平移，
-    # 用于补偿传输/处理链路造成的固定延迟差。
-    # Odin1 在 use_host_ros_time=0（odin_driver.yaml 默认配置）下，
-    # IMU/cloud_raw/odometry 全部使用设备内部统一时钟打时间戳，
-    # 跨 topic 时间基准已经一致，通常不需要再调这两个offset，保持0即可。
-    # 只有当 use_host_ros_time 改成 1/2，或链路上有额外硬件延迟时才需要实测标定。
-    # img_time_offset 是相机（HIK，独立于Odin1时钟域）与Odin1数据的时间差，
-    # 只在 LIVO 模式（slam_mode=2）接相机时才需要关心。
+    # imu_time_offset: 跨传感器整体时间平移，用于补偿传输/处理链路
+    # 造成的固定延迟差。Odin1 在 use_host_ros_time=0 下各 topic 已共享
+    # 统一时钟，通常不需要调整，保持 0。
     imu_time_offset: 0.0
-    img_time_offset: 0.0
 
     # ── IMU-LiDAR 外参（Odin1 设备校准值，T_imu_lidar）──────────
     # 来源: /odin1/wiwc twist.covariance[0..15]（实测每台设备读取）。
@@ -63,25 +67,30 @@ radar_fast_livo2_node:
     # + UpdateVoxelMap 保护阈值 在走动到地图未覆盖区域时会形成死锁。
     extrinsic_T: [-0.02809819, 0.02407025, 0.03455344]
     extrinsic_R: [0.99994728, -0.00933787, 0.00427184,
-                  0.00940712,  0.99981980, -0.01648837,
-                 -0.00411710,  0.01652768,  0.99985493]
+                   0.00940712,  0.99981980, -0.01648837,
+                  -0.00411710,  0.01652768,  0.99985493]
     extrinsic_est_en: false    # 使用已知外参，关在线估计
 
     # ── Camera-LiDAR 外参（占位，需用 direct_visual_lidar_calibration 标定）──
     # T_lidar_camera 分解: Rcl = 相机→LiDAR旋转, Pcl = 相机→LiDAR平移
     Pcl: [0.0, 0.0, 0.0]
     Rcl: [1.0, 0.0, 0.0,
-          0.0, 1.0, 0.0,
-          0.0, 0.0, 1.0]
+           0.0, 1.0, 0.0,
+           0.0, 0.0, 1.0]
 
-    # ── 相机内参（占位，需用标定工具获得，HIK 12MP相机需先降采样）──
+    # ── 相机内参 ────────────────────────────────────────────────
+    # HIK 12MP 全分辨率 5472x3648，此处使用降采样至 2736x1824（img_scale 0.5）
+    # 的目标分辨率。内参 fx/fy/cx/cy 请用以下两种方式之一填入：
+    #   (a) 全分辨率标定值 × 0.5（cx/cy 也须按比例缩放）
+    #   (b) 直接在目标分辨率（2736x1824）做标定得到的值
+    # 默认占位值为目标分辨率中心点，部署前必须替换为实测标定值。
     cam_fx: 500.0
     cam_fy: 500.0
-    cam_cx: 640.0
-    cam_cy: 360.0
-    cam_width: 1280    # 降采样后的宽（原始 12MP 需先 resize，见 img_scale）
-    cam_height: 720
-    img_scale: 0.5     # 相对原始 12MP 图像的缩放比例，直接法必须降到可实时处理的分辨率
+    cam_cx: 1368.0      # 2736/2，占位，需替换为实测值
+    cam_cy: 912.0       # 1824/2，占位，需替换为实测值
+    cam_width: 2736
+    cam_height: 1824
+    img_scale: 0.5       # 全分辨率→目标分辨率的缩放比例（仅文档/验证用）
 
     # ── VIO（LIVO模式才生效）────────────────────────────────────
     patch_size: 8

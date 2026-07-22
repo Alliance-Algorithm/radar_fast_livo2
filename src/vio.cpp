@@ -6,6 +6,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <limits>
 #include <numeric>
 
 namespace radar::fast_livo2 {
@@ -36,17 +37,49 @@ void VIOManager::init(double fx, double fy, double cx, double cy, int width, int
     ncc_thre_            = ncc_thre;
     max_iterations_      = max_iterations;
 
-    // Camera-from-IMU 外参链: Rci = Rcl * Rli, Pci = Rcl * Pli + Pcl
+    // Rli/Pli 已是上游语义 (R_il^T, -R_il^T*t_il)；Rci = Rcl*Rli, Pci = Rcl*Pli+Pcl
     Rci_ = Rcl_ * Rli_;
     Pci_ = Rcl_ * Pli_ + Pcl_;
 
-    // 派生雅可比（对应 FAST-LIVO2 VIOManager::initializeVIO）
     Jdphi_dR_ = Rci_;
     V3D Pic   = -Rci_.transpose() * Pci_;
     Jdp_dR_   = -Rci_ * skewSym(Pic);
 
-    grid_n_width_  = width_ / grid_size_ + 1;
-    grid_n_height_ = height_ / grid_size_ + 1;
+    grid_n_width_  = std::max(1, width_ / grid_size_ + 1);
+    grid_n_height_ = std::max(1, height_ / grid_size_ + 1);
+    last_G_.setZero();
+    last_G_valid_ = false;
+}
+
+VOXEL_LOCATION VIOManager::worldToVisualVoxel(const V3D& p_w) const {
+    const double inv = 1.0 / visual_voxel_size_;
+    // 与上游 insertPointIntoVoxelMap 一致：负半轴 floor 后再 -1
+    auto axis = [inv](double v) -> int64_t {
+        double s = v * inv;
+        if (s < 0.0) s -= 1.0;
+        return static_cast<int64_t>(std::floor(s));
+    };
+    return VOXEL_LOCATION(axis(p_w.x()), axis(p_w.y()), axis(p_w.z()));
+}
+
+bool VIOManager::isDepthContinuous(
+    const cv::Mat& depth_img, const Eigen::Vector2d& pc, float pt_depth) const {
+    if (depth_img.empty() || depth_img.type() != CV_32FC1) return true;
+    const int u0   = static_cast<int>(pc.x());
+    const int v0   = static_cast<int>(pc.y());
+    const int half = patch_size_half_;
+    for (int v = v0 - half; v <= v0 + half; ++v) {
+        if (v < 0 || v >= depth_img.rows) continue;
+        const float* row = depth_img.ptr<float>(v);
+        for (int u = u0 - half; u <= u0 + half; ++u) {
+            if (u < 0 || u >= depth_img.cols) continue;
+            if (u == u0 && v == v0) continue;
+            const float d = row[u];
+            if (d <= 0.0f) continue;
+            if (std::fabs(pt_depth - d) > depth_continuity_m_) return false;
+        }
+    }
+    return true;
 }
 
 // ══════════════════════════════════════════════════════════════════
@@ -206,10 +239,6 @@ int VIOManager::getBestSearchLevel(const Eigen::Matrix2d& A_cur_ref, int max_lev
 }
 
 // ══════════════════════════════════════════════════════════════════
-// calculateNCC — 归一化互相关（patch 质量评分）
-// 原始来源: FAST-LIVO2/src/vio.cpp VIOManager::calculateNCC
-// ══════════════════════════════════════════════════════════════════
-// ══════════════════════════════════════════════════════════════════
 // cropAroundPixel — 裁剪 Feature::img_ 存储区域（避免整帧 clone）
 //
 // 半径推导: warpAffine 在最粗金字塔层的最大采样偏移
@@ -255,63 +284,116 @@ void VIOManager::resetGrid() {
     const size_t n = static_cast<size_t>(grid_n_width_) * grid_n_height_;
     grid_best_point_.assign(n, nullptr);
     grid_best_score_.assign(n, 0.0f);
+    grid_map_dist_.assign(n, 1.0e4f);
 }
 
-// ══════════════════════════════════════════════════════════════════
-// retrieveFromVisualSparseMap — 已有 VisualPoint 投影匹配，构建 SubSparseMap
-// 原始来源: FAST-LIVO2/src/vio.cpp VIOManager::retrieveFromVisualSparseMap
-//
-// 流程: 遍历视觉地图哈希表 → 投影到当前帧 → 网格内选最优 → 计算仿射 warp →
-//       多金字塔层提取 warp patch → 与当前帧 patch 比较（可选 NCC 剔除）
-// ══════════════════════════════════════════════════════════════════
+// retrieve: 当前 scan 体素索引 + 深度连续性 + 网格最近距离（对齐上游主干）
 void VIOManager::retrieveFromVisualSparseMap(const cv::Mat& img,
-    const std::vector<pointWithVar>& /*pg*/,
+    const std::vector<pointWithVar>& pg,
     const std::unordered_map<VOXEL_LOCATION, std::unique_ptr<VoxelOctoTree>>& /*plane_map*/) {
-    resetGrid();
-    const int boundary = patch_size_half_ * (1 << (patch_pyramid_level_ - 1)) + 1;
+    if (feat_map_.empty()) {
+        visual_submap_.clear();
+        total_points_ = 0;
+        return;
+    }
 
-    // ── 1. 投影所有视觉地图点，网格内选 NCC/深度最优的一个 ──
-    for (auto& [loc, bucket] : feat_map_) {
-        for (auto& vp : bucket.points) {
+    resetGrid();
+    visual_submap_.clear();
+    const int boundary  = patch_size_half_ * (1 << (patch_pyramid_level_ - 1)) + 1;
+    const V3D cam_pos_w = -Rcw_.transpose() * Pcw_;
+
+    // 1) 当前 LiDAR 点 → depth 图 + 相关 visual voxel 键
+    if (depth_buf_.rows != height_ || depth_buf_.cols != width_ || depth_buf_.type() != CV_32FC1) {
+        depth_buf_ = cv::Mat::zeros(height_, width_, CV_32FC1);
+    } else {
+        depth_buf_.setTo(0.0f);
+    }
+    cv::Mat& depth_img = depth_buf_;
+    std::unordered_map<VOXEL_LOCATION, char> sub_feat_map;
+    sub_feat_map.reserve(pg.size() / 4 + 16);
+
+    for (const auto& pv : pg) {
+        const VOXEL_LOCATION key = worldToVisualVoxel(pv.point_w);
+        sub_feat_map[key]        = 0;
+
+        const V3D p_cam = Rcw_ * pv.point_w + Pcw_;
+        if (p_cam.z() <= 0.05) continue;
+        const Eigen::Vector2d pc = world2cam(p_cam);
+        if (!isInFrame(pc, 1)) continue;
+        const int u               = static_cast<int>(pc.x());
+        const int v               = static_cast<int>(pc.y());
+        depth_img.at<float>(v, u) = static_cast<float>(p_cam.z());
+    }
+
+    // 2) 仅在当前 scan 覆盖的体素内取视觉点；网格内保留最近相机距离
+    for (const auto& [key, _] : sub_feat_map) {
+        auto it = feat_map_.find(key);
+        if (it == feat_map_.end()) continue;
+        for (auto& vp_up : it->second.points) {
+            VisualPoint* vp = vp_up.get();
+            if (vp == nullptr || vp->obs_.empty()) continue;
+            if (!vp->is_normal_initialized_) continue;
+
             const V3D p_cam = Rcw_ * vp->pos_ + Pcw_;
-            if (p_cam.z() <= 0.0) continue;
+            if (p_cam.z() <= 0.05) continue;
             const Eigen::Vector2d pc = world2cam(p_cam);
             if (!isInFrame(pc, boundary)) continue;
+            if (!isDepthContinuous(depth_img, pc, static_cast<float>(p_cam.z()))) continue;
 
-            const int gx     = static_cast<int>(pc.x()) / grid_size_;
-            const int gy     = static_cast<int>(pc.y()) / grid_size_;
-            const size_t idx = static_cast<size_t>(gy) * grid_n_width_ + gx;
-            if (idx >= grid_best_score_.size()) continue;
-
-            Feature* ref =
-                vp->ref_patch_ ? vp->ref_patch_ : vp->getCloseViewObs(-Rcw_.transpose() * Pcw_);
-            if (ref == nullptr) continue;
-
-            const float score = ref->score_;
-            if (score > grid_best_score_[idx]) {
-                grid_best_score_[idx] = score;
-                grid_best_point_[idx] = vp.get();
+            const int gx = static_cast<int>(pc.x()) / grid_size_;
+            const int gy = static_cast<int>(pc.y()) / grid_size_;
+            if (gx < 0 || gy < 0 || gx >= grid_n_width_ || gy >= grid_n_height_) continue;
+            const size_t idx = static_cast<size_t>(gy) * static_cast<size_t>(grid_n_width_)
+                + static_cast<size_t>(gx);
+            const float dist = static_cast<float>((cam_pos_w - vp->pos_).norm());
+            if (dist <= grid_map_dist_[idx]) {
+                grid_map_dist_[idx]   = dist;
+                grid_best_point_[idx] = vp;
             }
         }
     }
 
-    // ── 2. 对每个网格winner: 计算仿射 warp + 提取多层 patch ──
-    visual_submap_.clear();
+    // 无当前 scan 体素命中时回退：全图投影（首帧建图后扩展期）
+    if (std::none_of(grid_best_point_.begin(), grid_best_point_.end(),
+            [](VisualPoint* p) { return p != nullptr; })) {
+        for (auto& [loc, bucket] : feat_map_) {
+            for (auto& vp_up : bucket.points) {
+                VisualPoint* vp = vp_up.get();
+                if (vp == nullptr || vp->obs_.empty() || !vp->is_normal_initialized_) continue;
+                const V3D p_cam = Rcw_ * vp->pos_ + Pcw_;
+                if (p_cam.z() <= 0.05) continue;
+                const Eigen::Vector2d pc = world2cam(p_cam);
+                if (!isInFrame(pc, boundary)) continue;
+                if (!isDepthContinuous(depth_img, pc, static_cast<float>(p_cam.z()))) continue;
+                const int gx = static_cast<int>(pc.x()) / grid_size_;
+                const int gy = static_cast<int>(pc.y()) / grid_size_;
+                if (gx < 0 || gy < 0 || gx >= grid_n_width_ || gy >= grid_n_height_) continue;
+                const size_t idx = static_cast<size_t>(gy) * static_cast<size_t>(grid_n_width_)
+                    + static_cast<size_t>(gx);
+                const float dist = static_cast<float>((cam_pos_w - vp->pos_).norm());
+                if (dist <= grid_map_dist_[idx]) {
+                    grid_map_dist_[idx]   = dist;
+                    grid_best_point_[idx] = vp;
+                }
+            }
+        }
+    }
+
+    // 3) warp + NCC + 光度 SSD 剔除
     for (size_t idx = 0; idx < grid_best_point_.size(); ++idx) {
         VisualPoint* vp = grid_best_point_[idx];
         if (vp == nullptr) continue;
 
-        Feature* ref =
-            vp->ref_patch_ ? vp->ref_patch_ : vp->getCloseViewObs(-Rcw_.transpose() * Pcw_);
-        if (ref == nullptr) continue;
+        Feature* ref = vp->ref_patch_ ? vp->ref_patch_ : vp->getCloseViewObs(cam_pos_w);
+        if (ref == nullptr || ref->img_.empty()) continue;
 
-        // 参考帧位姿: p_cam_ref = ref->T_f_w_rot_ * p_world + ref->T_f_w_pos_
-        // 当前-参考相对位姿: p_cam_cur = R_cur_ref * p_cam_ref + t_cur_ref
         const M3D R_cur_ref = Rcw_ * ref->T_f_w_rot_.transpose();
         const V3D t_cur_ref = Pcw_ - R_cur_ref * ref->T_f_w_pos_;
 
         Eigen::Matrix2d A_cur_ref;
         const double depth_ref = (ref->T_f_w_rot_ * vp->pos_ + ref->T_f_w_pos_).z();
+        if (depth_ref < 1e-3) continue;
+
         if (normal_en_ && vp->is_normal_initialized_) {
             const V3D xyz_ref    = ref->T_f_w_rot_ * vp->pos_ + ref->T_f_w_pos_;
             const V3D normal_ref = ref->T_f_w_rot_ * vp->normal_;
@@ -322,55 +404,63 @@ void VIOManager::retrieveFromVisualSparseMap(const cv::Mat& img,
                 ref->level_, 0, patch_size_half_, A_cur_ref);
         }
 
-        const int search_level = getBestSearchLevel(A_cur_ref, patch_pyramid_level_ - 1);
+        if (!A_cur_ref.allFinite() || std::abs(A_cur_ref.determinant()) < 1e-8) continue;
 
-        // ref->img_ 只存 ref->px_ 周围的裁剪区域，采样锚点需换算为裁剪图内坐标；
-        // 仿射位移是平移不变量，重定基准点不影响 warp 本身的计算结果。
+        const int search_level         = getBestSearchLevel(A_cur_ref, patch_pyramid_level_ - 1);
         const Eigen::Vector2d px_local = ref->px_ - ref->patch_origin_.cast<double>();
         std::vector<float> warp_patch(
-            static_cast<size_t>(patch_size_total_) * patch_pyramid_level_, 0.0f);
+            static_cast<size_t>(patch_size_total_) * static_cast<size_t>(patch_pyramid_level_),
+            0.0f);
         for (int lvl = 0; lvl < patch_pyramid_level_; ++lvl) {
             warpAffine(A_cur_ref, ref->img_, px_local, ref->level_, search_level, lvl,
                 patch_size_half_, warp_patch.data());
         }
 
-        // 当前帧同一层 patch（用于 NCC 剔除判断）
         const V3D p_cam          = Rcw_ * vp->pos_ + Pcw_;
         const Eigen::Vector2d pc = world2cam(p_cam);
+        const int scale_s        = 1 << search_level;
+        if (!isInFrame(pc, patch_size_half_ * scale_s + 2)) continue;
+
         std::vector<float> cur_patch(
-            static_cast<size_t>(patch_size_total_) * patch_pyramid_level_, 0.0f);
+            static_cast<size_t>(patch_size_total_) * static_cast<size_t>(patch_pyramid_level_),
+            0.0f);
         getImagePatch(img, pc, cur_patch.data(), search_level);
 
+        const float* w0 = &warp_patch[static_cast<size_t>(patch_size_total_) * search_level];
+        const float* c0 = &cur_patch[static_cast<size_t>(patch_size_total_) * search_level];
+
         if (ncc_en_) {
-            const double ncc = calculateNCC(&warp_patch[patch_size_total_ * search_level],
-                &cur_patch[patch_size_total_ * search_level], patch_size_total_);
-            if (ncc < ncc_thre_) continue; // 视角变化过大/遮挡，剔除
+            const double ncc = calculateNCC(w0, c0, patch_size_total_);
+            if (ncc < ncc_thre_) continue;
         }
+
+        float ssd = 0.0f;
+        for (int k = 0; k < patch_size_total_; ++k) {
+            const float d = w0[k] - c0[k];
+            ssd += d * d;
+        }
+        if (ssd > static_cast<float>(outlier_threshold_ * patch_size_total_)) continue;
 
         visual_submap_.voxel_points.push_back(vp);
         visual_submap_.warp_patch.push_back(std::move(warp_patch));
         visual_submap_.search_levels.push_back(search_level);
-        visual_submap_.errors.push_back(0.0f);
+        visual_submap_.errors.push_back(ssd);
     }
 
     total_points_ = static_cast<int>(visual_submap_.voxel_points.size());
 }
 
-// ══════════════════════════════════════════════════════════════════
-// updateState — 单个金字塔层的前向组合 ESIKF 光度更新
-// 原始来源: FAST-LIVO2/src/vio.cpp VIOManager::updateState
-//
-// 差异: 18 维状态无 inv_expo_time → H_sub 为 N×6（无曝光列），
-//       曝光时间固定为 1.0（不做曝光估计）
-// ══════════════════════════════════════════════════════════════════
 void VIOManager::updateState(const cv::Mat& img, int level) {
-    if (total_points_ == 0) return;
+    if (total_points_ == 0 || state_ == nullptr || state_propagat_ == nullptr) return;
 
     const int H_DIM = total_points_ * patch_size_total_;
     Eigen::VectorXd z(H_DIM);
     Eigen::MatrixXd H_sub(H_DIM, 6);
 
-    bool ekf_end = false;
+    StatesGroup old_state = *state_;
+    float last_error      = std::numeric_limits<float>::max();
+    bool ekf_end          = false;
+
     for (int iteration = 0; iteration < max_iterations_ && !ekf_end; ++iteration) {
         z.setZero();
         H_sub.setZero();
@@ -381,37 +471,44 @@ void VIOManager::updateState(const cv::Mat& img, int level) {
         Pcw_             = -Rci_ * Rwi.transpose() * Pwi + Pci_;
         const M3D Jdp_dt = Rci_ * Rwi.transpose();
 
+        float error_sum = 0.0f;
+        int n_meas      = 0;
+
         for (int i = 0; i < total_points_; ++i) {
             const int search_level  = visual_submap_.search_levels[i];
             const int pyramid_level = level + search_level;
             const int scale         = 1 << pyramid_level;
+            const int margin        = patch_size_half_ * scale + scale + 1;
 
             VisualPoint* vp = visual_submap_.voxel_points[i];
             const V3D pf    = Rcw_ * vp->pos_ + Pcw_;
 
             Eigen::Matrix<double, 2, 3> Jdpi;
-            // ESIKF 迭代中 state_ 每轮都变，之前有效的点可能中途转到相机后方；
-            // 跳过该点本轮贡献（z/H 对应行保持 setZero()，不参与本轮更新）。
             if (!computeProjectionJacobian(pf, Jdpi)) continue;
             const Eigen::Vector2d pc = world2cam(pf);
-            const M3D p_hat          = skewSym(pf);
+            if (!isInFrame(pc, margin)) continue;
+
+            const M3D p_hat = skewSym(pf);
 
             const int u_ref_i    = static_cast<int>(std::floor(pc.x() / scale)) * scale;
             const int v_ref_i    = static_cast<int>(std::floor(pc.y() / scale)) * scale;
-            const float subpix_u = static_cast<float>(pc.x() - u_ref_i) / scale;
-            const float subpix_v = static_cast<float>(pc.y() - v_ref_i) / scale;
-            const float w_tl     = (1 - subpix_u) * (1 - subpix_v);
-            const float w_tr     = subpix_u * (1 - subpix_v);
-            const float w_bl     = (1 - subpix_u) * subpix_v;
+            const float subpix_u = static_cast<float>(pc.x() - u_ref_i) / static_cast<float>(scale);
+            const float subpix_v = static_cast<float>(pc.y() - v_ref_i) / static_cast<float>(scale);
+            const float w_tl     = (1.0f - subpix_u) * (1.0f - subpix_v);
+            const float w_tr     = subpix_u * (1.0f - subpix_v);
+            const float w_bl     = (1.0f - subpix_u) * subpix_v;
             const float w_br     = subpix_u * subpix_v;
 
             const std::vector<float>& P = visual_submap_.warp_patch[i];
 
             for (int x = 0; x < patch_size_; x++) {
-                const uint8_t* row =
-                    img.ptr<uint8_t>(v_ref_i + x * scale - patch_size_half_ * scale)
-                    + (u_ref_i - patch_size_half_ * scale);
+                const int row_y = v_ref_i + x * scale - patch_size_half_ * scale;
+                if (row_y < scale || row_y + scale >= img.rows) continue;
+                const uint8_t* row = img.ptr<uint8_t>(row_y) + (u_ref_i - patch_size_half_ * scale);
                 for (int y = 0; y < patch_size_; ++y, row += scale) {
+                    const int col_x = u_ref_i - patch_size_half_ * scale + y * scale;
+                    if (col_x < scale || col_x + 2 * scale >= img.cols) continue;
+
                     const float du = 0.5f
                         * ((w_tl * row[scale] + w_tr * row[2 * scale]
                                + w_bl * row[scale * img.cols + scale]
@@ -427,7 +524,7 @@ void VIOManager::updateState(const cv::Mat& img, int level) {
                                 + w_bl * row[0] + w_br * row[scale]));
 
                     Eigen::Vector2d Jimg(du, dv);
-                    Jimg /= scale;
+                    Jimg /= static_cast<double>(scale);
 
                     const Eigen::Matrix<double, 1, 3> Jdphi = Jimg.transpose() * Jdpi * p_hat;
                     const Eigen::Matrix<double, 1, 3> Jdp   = -Jimg.transpose() * Jdpi;
@@ -436,16 +533,34 @@ void VIOManager::updateState(const cv::Mat& img, int level) {
 
                     const double cur_value = w_tl * row[0] + w_tr * row[scale]
                         + w_bl * row[scale * img.cols] + w_br * row[scale * img.cols + scale];
-                    const double res =
-                        cur_value - P[patch_size_total_ * level + x * patch_size_ + y];
+                    const double res = cur_value
+                        - static_cast<double>(P[static_cast<size_t>(patch_size_total_) * level
+                            + static_cast<size_t>(x) * patch_size_ + y]);
 
                     const int row_idx             = i * patch_size_total_ + x * patch_size_ + y;
                     z(row_idx)                    = res;
                     H_sub.block<1, 3>(row_idx, 0) = JdR;
                     H_sub.block<1, 3>(row_idx, 3) = Jdt;
+                    error_sum += static_cast<float>(res * res);
+                    ++n_meas;
                 }
             }
         }
+
+        if (n_meas == 0) {
+            *state_ = old_state;
+            break;
+        }
+
+        const float error = error_sum / static_cast<float>(n_meas);
+
+        if (error > last_error) {
+            *state_ = old_state;
+            break;
+        }
+
+        old_state  = *state_;
+        last_error = error;
 
         const Eigen::MatrixXd H_sub_T     = H_sub.transpose();
         Eigen::Matrix<double, 6, 6> H_T_H = H_sub_T * H_sub;
@@ -466,59 +581,56 @@ void VIOManager::updateState(const cv::Mat& img, int level) {
         solution += vec - G * vec;
 
         (*state_) += solution;
+        last_G_       = G;
+        last_G_valid_ = true;
 
         const V3D rot_add = solution.block<3, 1>(0, 0);
         const V3D t_add   = solution.block<3, 1>(3, 0);
         if (rot_add.norm() * 57.3 < 0.001 && t_add.norm() * 100.0 < 0.001) {
             ekf_end = true;
         }
-        if (iteration == max_iterations_ - 1 || ekf_end) {
-            state_->cov -= G * state_->cov;
-        }
     }
 }
 
-// ══════════════════════════════════════════════════════════════════
-// computeJacobianAndUpdateEKF — 金字塔粗到细 ESIKF 光度更新总控
-// 原始来源: FAST-LIVO2/src/vio.cpp VIOManager::computeJacobianAndUpdateEKF
-// ══════════════════════════════════════════════════════════════════
 void VIOManager::computeJacobianAndUpdateEKF(const cv::Mat& img) {
     if (total_points_ == 0) return;
+    last_G_valid_ = false;
+    last_G_.setZero();
     for (int level = patch_pyramid_level_ - 1; level >= 0; --level) {
         updateState(img, level);
     }
+    if (last_G_valid_ && state_ != nullptr) {
+        state_->cov -= last_G_ * state_->cov;
+        state_->cov = 0.5 * (state_->cov + state_->cov.transpose());
+    }
 }
 
-// ══════════════════════════════════════════════════════════════════
-// generateVisualMapPoints — 从 LiDAR 平面点生成新 VisualPoint
-// 原始来源: FAST-LIVO2/src/vio.cpp VIOManager::generateVisualMapPoints
-//
-// 对每个带法向量的 LiDAR 点: 投影到当前帧，Shi-Tomasi 角点分数筛选，
-// 网格内选最优，插入视觉地图哈希表。
-// ══════════════════════════════════════════════════════════════════
 void VIOManager::generateVisualMapPoints(const cv::Mat& img, std::vector<pointWithVar>& pg) {
-    const int boundary = patch_size_half_ * (1 << (patch_pyramid_level_ - 1)) + 1;
+    if (pg.size() <= 10) return;
 
-    std::vector<float> grid_score(grid_best_point_.size(), 0.0f);
-    std::vector<int> grid_pt_idx(grid_best_point_.size(), -1);
+    const int boundary  = patch_size_half_ * (1 << (patch_pyramid_level_ - 1)) + 1;
+    const size_t n_grid = static_cast<size_t>(grid_n_width_) * static_cast<size_t>(grid_n_height_);
+    std::vector<float> grid_score(n_grid, 0.0f);
+    std::vector<int> grid_pt_idx(n_grid, -1);
 
     for (size_t i = 0; i < pg.size(); ++i) {
         const pointWithVar& pv = pg[i];
-        if (pv.normal.norm() < 1e-6) continue; // 无有效法向量，跳过
+        if (pv.normal.norm() < 1e-6) continue;
 
         const V3D p_cam = Rcw_ * pv.point_w + Pcw_;
-        if (p_cam.z() <= 0.0) continue;
+        if (p_cam.z() <= 0.05) continue;
         const Eigen::Vector2d pc = world2cam(p_cam);
         if (!isInFrame(pc, boundary)) continue;
 
-        const int gx     = static_cast<int>(pc.x()) / grid_size_;
-        const int gy     = static_cast<int>(pc.y()) / grid_size_;
-        const size_t idx = static_cast<size_t>(gy) * grid_n_width_ + gx;
-        if (idx >= grid_score.size() || grid_best_point_[idx] != nullptr)
-            continue; // 该格已有匹配点，不再新增
+        const int gx = static_cast<int>(pc.x()) / grid_size_;
+        const int gy = static_cast<int>(pc.y()) / grid_size_;
+        if (gx < 0 || gy < 0 || gx >= grid_n_width_ || gy >= grid_n_height_) continue;
+        const size_t idx =
+            static_cast<size_t>(gy) * static_cast<size_t>(grid_n_width_) + static_cast<size_t>(gx);
+        if (idx < grid_best_point_.size() && grid_best_point_[idx] != nullptr) continue;
 
-        // Shi-Tomasi 角点响应（简化: 用 3x3 Sobel 梯度方差近似）
-        const int u = static_cast<int>(pc.x()), v = static_cast<int>(pc.y());
+        const int u = static_cast<int>(pc.x());
+        const int v = static_cast<int>(pc.y());
         if (u < 3 || v < 3 || u >= img.cols - 3 || v >= img.rows - 3) continue;
         double gxx = 0, gyy = 0, gxy = 0;
         for (int dy = -1; dy <= 1; ++dy) {
@@ -534,11 +646,10 @@ void VIOManager::generateVisualMapPoints(const cv::Mat& img, std::vector<pointWi
                 gxy += ix * iy;
             }
         }
-        const double trace   = gxx + gyy;
-        const double det     = gxx * gyy - gxy * gxy;
-        const double disc    = std::max(0.0, trace * trace / 4.0 - det);
-        const double min_eig = trace / 2.0 - std::sqrt(disc);
-        const float score    = static_cast<float>(min_eig);
+        const double trace = gxx + gyy;
+        const double det   = gxx * gyy - gxy * gxy;
+        const double disc  = std::max(0.0, trace * trace / 4.0 - det);
+        const float score  = static_cast<float>(trace / 2.0 - std::sqrt(disc));
 
         if (score > grid_score[idx]) {
             grid_score[idx]  = score;
@@ -546,22 +657,29 @@ void VIOManager::generateVisualMapPoints(const cv::Mat& img, std::vector<pointWi
         }
     }
 
-    constexpr float kMinCornerScore = 20.0f;
     for (size_t idx = 0; idx < grid_pt_idx.size(); ++idx) {
-        if (grid_pt_idx[idx] < 0 || grid_score[idx] < kMinCornerScore) continue;
+        if (grid_pt_idx[idx] < 0 || grid_score[idx] < min_corner_score_) continue;
         const pointWithVar& pv = pg[static_cast<size_t>(grid_pt_idx[idx])];
 
-        const V3D p_cam          = Rcw_ * pv.point_w + Pcw_;
+        const V3D p_cam = Rcw_ * pv.point_w + Pcw_;
+        if (p_cam.z() <= 0.05) continue;
         const Eigen::Vector2d pc = world2cam(p_cam);
-        const V3D f_ref          = cam2world(pc).normalized();
+        if (!isInFrame(pc, boundary)) continue;
+        const V3D f_ref = cam2world(pc).normalized();
+
+        V3D n             = pv.normal;
+        const V3D dir_cam = p_cam.normalized();
+        const V3D n_cam   = Rcw_ * n;
+        if (dir_cam.dot(n_cam) < 0.0) n = -n;
 
         auto vp                    = std::make_unique<VisualPoint>(pv.point_w);
-        vp->normal_                = pv.normal;
+        vp->normal_                = n;
         vp->covariance_            = pv.var;
         vp->is_normal_initialized_ = true;
 
         std::vector<float> patch(
-            static_cast<size_t>(patch_size_total_) * patch_pyramid_level_, 0.0f);
+            static_cast<size_t>(patch_size_total_) * static_cast<size_t>(patch_pyramid_level_),
+            0.0f);
         for (int lvl = 0; lvl < patch_pyramid_level_; ++lvl) {
             getImagePatch(img, pc, patch.data(), lvl);
         }
@@ -574,10 +692,7 @@ void VIOManager::generateVisualMapPoints(const cv::Mat& img, std::vector<pointWi
         vp->ref_patch_      = feat.get();
         vp->obs_.push_back(std::move(feat));
 
-        const double voxel_size = visual_voxel_size_;
-        const V3D loc           = pv.point_w / voxel_size;
-        VOXEL_LOCATION key(static_cast<int64_t>(std::floor(loc.x())),
-            static_cast<int64_t>(std::floor(loc.y())), static_cast<int64_t>(std::floor(loc.z())));
+        const VOXEL_LOCATION key = worldToVisualVoxel(pv.point_w);
         feat_map_[key].points.push_back(std::move(vp));
     }
 }

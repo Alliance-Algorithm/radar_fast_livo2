@@ -12,12 +12,18 @@
 //   - LiDAR 地图用 VoxelMapManager（voxel_map.hpp），视觉地图另建
 //     独立哈希表 feat_map_（VOXEL_LOCATION → VisualPoint 列表）
 //
+// 外参约定（与 hku-mars/FAST-LIVO2 一致）:
+//   - yaml extrinsic_R/T: p_imu = R_il * p_lidar + t_il（与 LIO 相同）
+//   - 传入 init 的 Rli/Pli 必须已转为上游 setImuToLidarExtrinsic 语义:
+//       Rli = R_il^T,  Pli = -R_il^T * t_il
+//   - Rci = Rcl * Rli,  Pci = Rcl * Pli + Pcl（Camera-from-IMU）
+//
 // 算法流程 (每帧):
-//   1. retrieveFromVisualSparseMap: 已有 VisualPoint 投影匹配 → SubSparseMap
-//   2. computeJacobianAndUpdateEKF: 金字塔粗到细，光度残差 ESIKF 迭代更新
+//   1. retrieveFromVisualSparseMap: 当前 scan 体素 + 深度连续性 → SubSparseMap
+//   2. computeJacobianAndUpdateEKF: 金字塔粗到细 + 误差回退，结束后单次 cov 更新
 //   3. generateVisualMapPoints: LiDAR 平面点生成新 VisualPoint
 //   4. updateVisualMapPoints: 现有 VisualPoint 按视角变化添加新观测
-//   5. updateReferencePatch: 重新评分 NCC，选最佳参考 patch
+//   5. updateReferencePatch: 按视角重选参考 patch
 
 #include "radar_fast_livo2/common_lib.hpp"
 #include "radar_fast_livo2/esikf_state.hpp"
@@ -150,6 +156,11 @@ public:
     bool normal_en_           = true; // 用平面法向量做单应性 warp
     bool ncc_en_              = true; // NCC outlier 剔除
     double visual_voxel_size_ = 0.5;  // 视觉地图哈希体素大小 (m)，独立于 LiDAR voxel_map
+    // 光度 SSD 阈值：error > outlier_threshold_ * patch_size_total_ 则剔除（对齐上游）
+    double outlier_threshold_ = 300.0;
+    // 深度连续性：patch 邻域 LiDAR 深度与特征点深度差超过此值视为遮挡
+    float depth_continuity_m_ = 0.5f;
+    float min_corner_score_   = 20.0f;
 
     // ── 当前帧状态（由外部在调用 processFrame 前设置）──────────────
     StatesGroup* state_          = nullptr; // 当前 ESIKF 状态（会被本类更新）
@@ -166,11 +177,21 @@ public:
     SubSparseMap visual_submap_;
     int total_points_ = 0;
 
+    // Depth image buffer reused across frames (allocated once, setTo(0) per frame).
+    cv::Mat depth_buf_;
+
+    // 金字塔各层迭代中最后一次成功 EKF 的 G；computeJacobianAndUpdateEKF 末尾用一次
+    MD<DIM_STATE, DIM_STATE> last_G_ = MD<DIM_STATE, DIM_STATE>::Zero();
+    bool last_G_valid_               = false;
+
     // ── 初始化: 设置内参/外参/配置，计算派生雅可比 ──────────────────
+    // Rli/Pli 必须是上游语义（见文件头），不是 yaml 里的 R_il/t_il 原值。
     void init(double fx, double fy, double cx, double cy, int width, int height, const M3D& Rcl,
         const V3D& Pcl, const M3D& Rli, const V3D& Pli, int patch_size, int patch_pyramid_level,
         int grid_size, bool normal_en, bool ncc_en, double img_point_cov, double ncc_thre,
         int max_iterations);
+
+    [[nodiscard]] VOXEL_LOCATION worldToVisualVoxel(const V3D& p_w) const;
 
     // ── 主入口: 处理一帧图像 ─────────────────────────────────────
     // @param img         灰度图 (CV_8UC1)
@@ -243,8 +264,13 @@ private:
     int grid_n_width_ = 0, grid_n_height_ = 0;
     std::vector<VisualPoint*> grid_best_point_;
     std::vector<float> grid_best_score_;
+    std::vector<float> grid_map_dist_; // 检索时网格内最近相机距离
 
     void resetGrid();
+
+    // 当前帧深度图上检查 patch 邻域是否深度连续（遮挡剔除）
+    [[nodiscard]] bool isDepthContinuous(
+        const cv::Mat& depth_img, const Eigen::Vector2d& pc, float pt_depth) const;
 };
 
 } // namespace radar::fast_livo2
