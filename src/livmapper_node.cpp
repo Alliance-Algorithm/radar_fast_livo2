@@ -24,38 +24,36 @@
 //   6. VoxelMapManager::UpdateVoxelMap() 增量更新地图
 //   7. (LIVO) VIO 光度更新 + 发布 odom / cloud_world / path / TF
 
+#include "radar_fast_livo2/camera_frame_queue.hpp"
 #include "radar_fast_livo2/common_lib.hpp"
+#include "radar_fast_livo2/esikf_state.hpp"
 #include "radar_fast_livo2/imu_processing.hpp"
 #include "radar_fast_livo2/preprocess.hpp"
-#include "radar_fast_livo2/esikf_state.hpp"
-#include "radar_fast_livo2/voxel_map.hpp"
-#include "radar_fast_livo2/vio.hpp"
 #include "radar_fast_livo2/shm_camera.hpp"
-#include "radar_fast_livo2/camera_frame_queue.hpp"
+#include "radar_fast_livo2/vio.hpp"
 
+#include <geometry_msgs/msg/pose_stamped.hpp>
+#include <geometry_msgs/msg/transform_stamped.hpp>
+#include <nav_msgs/msg/odometry.hpp>
+#include <nav_msgs/msg/path.hpp>
+#include <pcl/io/pcd_io.h>
+#include <pcl_conversions/pcl_conversions.h>
 #include <rclcpp/rclcpp.hpp>
 #include <sensor_msgs/msg/imu.hpp>
 #include <sensor_msgs/msg/point_cloud2.hpp>
-#include <nav_msgs/msg/odometry.hpp>
-#include <nav_msgs/msg/path.hpp>
-#include <geometry_msgs/msg/pose_stamped.hpp>
-#include <geometry_msgs/msg/transform_stamped.hpp>
 #include <tf2_ros/transform_broadcaster.h>
-#include <pcl_conversions/pcl_conversions.h>
-#include <pcl/io/pcd_io.h>
-#include <unordered_map>
-#include <cmath>
-
-#include "radar_fast_livo2/voxel_map.hpp"
 
 #include <array>
 #include <chrono>
 #include <deque>
+#include <filesystem>
 #include <limits>
 #include <mutex>
 #include <string>
 #include <thread>
-#include <filesystem>
+#include <unordered_map>
+
+#include "radar_fast_livo2/voxel_map.hpp"
 
 namespace radar::fast_livo2 {
 
@@ -67,7 +65,7 @@ public:
         load_parameters();
         init_subscribers();
         init_publishers();
-        start_camera();  // 仅在 LIVO 模式启动 SHM 相机线程
+        start_camera(); // 仅在 LIVO 模式启动 SHM 相机线程
         // HACK: 手动 SLAM 保存触发用轮询文件（约定同 Odin1 厂商驱动的
         // "echo 'set save_map 1' > /tmp/odin_command.txt"），而非 ROS2
         // Service/信号处理器——PCL 的 savePCDFileBinary 内部有动态内存
@@ -76,14 +74,13 @@ public:
         // 里跑。用 1Hz 定时器轮询触发文件比信号处理器更安全，也比新增
         // Service 接口更轻量（.script/odin-map-save 直接 touch 文件即可，
         // 不需要额外的 ROS2 client 依赖）。
-        save_trigger_timer_ = create_wall_timer(std::chrono::seconds(1), [this]() {
-            check_save_trigger();
-        });
+        save_trigger_timer_ =
+            create_wall_timer(std::chrono::seconds(1), [this]() { check_save_trigger(); });
         RCLCPP_INFO(get_logger(), "radar_fast_livo2 node started (mode=%d)", slam_mode_);
     }
 
     ~LivMapperNode() override {
-        stop_camera();  // 先停相机线程
+        stop_camera(); // 先停相机线程
         save_pcd();
     }
 
@@ -91,26 +88,26 @@ private:
     // ── 参数声明 ────────────────────────────────────────────────
     void declare_parameters() {
         // Topics
-        declare_parameter("lidar_topic",  "/odin1/cloud_raw");
-        declare_parameter("imu_topic",    "/odin1/imu");
+        declare_parameter("lidar_topic", "/odin1/cloud_raw");
+        declare_parameter("imu_topic", "/odin1/imu");
 
         // Camera SHM（替换原 img_topic）
         declare_parameter("camera/shm_name", std::string("/hikcamera_shm"));
 
         // Sensor config
-        declare_parameter("lidar_type",          static_cast<int>(LidarType::ODIN1));
-        declare_parameter("point_filter_num",    4);
-        declare_parameter("blind",               0.1);
-        declare_parameter("max_range",           30.0);
+        declare_parameter("lidar_type", static_cast<int>(LidarType::ODIN1));
+        declare_parameter("point_filter_num", 4);
+        declare_parameter("blind", 0.1);
+        declare_parameter("max_range", 30.0);
         declare_parameter("confidence_threshold", 35);
 
         // SLAM mode: 1=ONLY_LIO, 2=LIVO
         declare_parameter("slam_mode", static_cast<int>(SlamMode::ONLY_LIO));
-        declare_parameter("img_en",    false);
+        declare_parameter("img_en", false);
 
         // IMU
-        declare_parameter("imu_en",           true);
-        declare_parameter("init_imu_num",      20);
+        declare_parameter("imu_en", true);
+        declare_parameter("init_imu_num", 20);
         // 陀螺仪/加速度计噪声协方差 (rad/s、m/s^2，单位 per sqrt(Hz))。
         // 默认值 0.1 是 imu_processing.hpp 里未针对 Odin1 400Hz IMU 调过的占位值，
         // 在大场景(有效特征数千+)、帧耗时变长(~150ms)时会让 ESIKF 先验协方差
@@ -127,23 +124,17 @@ private:
         declare_parameter("acc_bias_cov", 0.0001);
         // 默认0：Odin1 在 use_host_ros_time=0 下各 topic 已共享统一时钟，
         // 详见 config/odin_livo2.yaml 内说明，通常不需要调整。
-        declare_parameter("imu_time_offset",   0.0);
-        declare_parameter("img_time_offset",   0.0);
+        declare_parameter("imu_time_offset", 0.0);
+        declare_parameter("img_time_offset", 0.0);
 
         // Extrinsics: LiDAR w.r.t. IMU
-        declare_parameter("extrinsic_T", std::vector<double>{0.0, 0.0, 0.0});
-        declare_parameter("extrinsic_R", std::vector<double>{
-            1.0, 0.0, 0.0,
-            0.0, 1.0, 0.0,
-            0.0, 0.0, 1.0
-        });
+        declare_parameter("extrinsic_T", std::vector<double> { 0.0, 0.0, 0.0 });
+        declare_parameter(
+            "extrinsic_R", std::vector<double> { 1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0 });
         // Extrinsics: Camera w.r.t. LiDAR (Rcl, Pcl)
-        declare_parameter("Pcl", std::vector<double>{0.0, 0.0, 0.0});
-        declare_parameter("Rcl", std::vector<double>{
-            1.0, 0.0, 0.0,
-            0.0, 1.0, 0.0,
-            0.0, 0.0, 1.0
-        });
+        declare_parameter("Pcl", std::vector<double> { 0.0, 0.0, 0.0 });
+        declare_parameter(
+            "Rcl", std::vector<double> { 1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0 });
         declare_parameter("extrinsic_est_en", true);
 
         // Camera intrinsics (pinhole)
@@ -151,38 +142,38 @@ private:
         declare_parameter("cam_fy", 500.0);
         declare_parameter("cam_cx", 1368.0);
         declare_parameter("cam_cy", 912.0);
-        declare_parameter("cam_width",  2736);
+        declare_parameter("cam_width", 2736);
         declare_parameter("cam_height", 1824);
-        declare_parameter("img_scale",  0.5);
+        declare_parameter("img_scale", 0.5);
 
         // VIO
-        declare_parameter("patch_size",          8);
+        declare_parameter("patch_size", 8);
         declare_parameter("patch_pyramid_level", 4);
 
         // Map (downsampling + voxel map config)
-        declare_parameter("filter_size_surf",    0.1);
-        declare_parameter("filter_size_map",     0.15);
-        declare_parameter("cube_side_length",    1000.0);
+        declare_parameter("filter_size_surf", 0.1);
+        declare_parameter("filter_size_map", 0.15);
+        declare_parameter("cube_side_length", 1000.0);
 
         // Voxel Map config (从 FAST-LIVO2 voxel_map.cpp loadVoxelConfig 移植)
-        declare_parameter("voxel_map/max_layer",         1);
-        declare_parameter("voxel_map/voxel_size",        0.5);
-        declare_parameter("voxel_map/min_eigen_value",   0.01);
-        declare_parameter("voxel_map/sigma_num",         3.0);
-        declare_parameter("voxel_map/beam_err",          0.02);
-        declare_parameter("voxel_map/dept_err",          0.05);
-        declare_parameter("voxel_map/layer_init_num",
-            std::vector<int64_t>{5LL, 5LL, 5LL, 5LL, 5LL});
-        declare_parameter("voxel_map/max_points_num",    50);
-        declare_parameter("voxel_map/max_iterations",    5);
-        declare_parameter("voxel_map/map_sliding_en",    false);
-        declare_parameter("voxel_map/half_map_size",     100);
-        declare_parameter("voxel_map/sliding_thresh",    8.0);
+        declare_parameter("voxel_map/max_layer", 1);
+        declare_parameter("voxel_map/voxel_size", 0.5);
+        declare_parameter("voxel_map/min_eigen_value", 0.01);
+        declare_parameter("voxel_map/sigma_num", 3.0);
+        declare_parameter("voxel_map/beam_err", 0.02);
+        declare_parameter("voxel_map/dept_err", 0.05);
+        declare_parameter(
+            "voxel_map/layer_init_num", std::vector<int64_t> { 5LL, 5LL, 5LL, 5LL, 5LL });
+        declare_parameter("voxel_map/max_points_num", 50);
+        declare_parameter("voxel_map/max_iterations", 5);
+        declare_parameter("voxel_map/map_sliding_en", false);
+        declare_parameter("voxel_map/half_map_size", 100);
+        declare_parameter("voxel_map/sliding_thresh", 8.0);
 
         // PCD save
-        declare_parameter("pcd_save_en",      false);
+        declare_parameter("pcd_save_en", false);
         declare_parameter("pcd_save_interval", -1);
-        declare_parameter("map_save_path",    std::string("/tmp/fast_livo2_map.pcd"));
+        declare_parameter("map_save_path", std::string("/tmp/fast_livo2_map.pcd"));
         declare_parameter("map_save_trigger", std::string("/tmp/fast_livo2_save_map"));
         // FIXME: 首帧 BuildVoxelMap 后，voxel map 里的平面约束还很稀疏，
         // 接下来几帧 ESIKF 还在收敛（实测 frame2→frame7 average residual
@@ -215,8 +206,8 @@ private:
         // IMU 处理器参数
         imu_process_.imu_en       = get_parameter("imu_en").as_bool();
         imu_process_.init_imu_num = get_parameter("init_imu_num").as_int();
-        const double gyr_cov = get_parameter("gyr_cov").as_double();
-        const double acc_cov = get_parameter("acc_cov").as_double();
+        const double gyr_cov      = get_parameter("gyr_cov").as_double();
+        const double acc_cov      = get_parameter("acc_cov").as_double();
         imu_process_.set_gyr_cov(Eigen::Vector3d(gyr_cov, gyr_cov, gyr_cov));
         imu_process_.set_acc_cov(Eigen::Vector3d(acc_cov, acc_cov, acc_cov));
         const double gyr_bias_cov = get_parameter("gyr_bias_cov").as_double();
@@ -227,17 +218,18 @@ private:
         // 外参加载
         auto ext_t = get_parameter("extrinsic_T").as_double_array();
         if (ext_t.size() != 3) {
-            throw std::runtime_error("extrinsic_T must have exactly 3 elements, got " + std::to_string(ext_t.size()));
+            throw std::runtime_error(
+                "extrinsic_T must have exactly 3 elements, got " + std::to_string(ext_t.size()));
         }
         auto ext_r = get_parameter("extrinsic_R").as_double_array();
         if (ext_r.size() != 9) {
-            throw std::runtime_error("extrinsic_R must have exactly 9 elements, got " + std::to_string(ext_r.size()));
+            throw std::runtime_error(
+                "extrinsic_R must have exactly 9 elements, got " + std::to_string(ext_r.size()));
         }
         Eigen::Vector3d t_li(ext_t[0], ext_t[1], ext_t[2]);
         Eigen::Matrix3d r_li;
-        r_li << ext_r[0], ext_r[1], ext_r[2],
-                ext_r[3], ext_r[4], ext_r[5],
-                ext_r[6], ext_r[7], ext_r[8];
+        r_li << ext_r[0], ext_r[1], ext_r[2], ext_r[3], ext_r[4], ext_r[5], ext_r[6], ext_r[7],
+            ext_r[8];
         imu_process_.set_extrinsic(t_li, r_li);
 
         img_time_offset_ = get_parameter("img_time_offset").as_double();
@@ -247,18 +239,17 @@ private:
         // ── ShmCamera 初始化（仅 LIVO 模式）──
         if (img_en_) {
             const std::string shm_name = get_parameter("camera/shm_name").as_string();
-            const int cam_width  = get_parameter("cam_width").as_int();
-            const int cam_height = get_parameter("cam_height").as_int();
+            const int cam_width        = get_parameter("cam_width").as_int();
+            const int cam_height       = get_parameter("cam_height").as_int();
 
             if (cam_width <= 0 || cam_height <= 0) {
                 throw std::runtime_error("LIVO: invalid camera size (cam_width/height)");
             }
 
-            camera_ = std::make_unique<ShmCamera>(
-                shm_name, cam_width, cam_height, img_time_offset_);
+            camera_ =
+                std::make_unique<ShmCamera>(shm_name, cam_width, cam_height, img_time_offset_);
 
-            RCLCPP_INFO(get_logger(),
-                "Camera SHM: '%s' → %dx%d gray, offset=%.3fs",
+            RCLCPP_INFO(get_logger(), "Camera SHM: '%s' → %dx%d gray, offset=%.3fs",
                 shm_name.c_str(), cam_width, cam_height, img_time_offset_);
         }
 
@@ -266,54 +257,52 @@ private:
         if (img_en_) {
             auto pcl_ = get_parameter("Pcl").as_double_array();
             if (pcl_.size() != 3) {
-                throw std::runtime_error("Pcl must have exactly 3 elements, got " + std::to_string(pcl_.size()));
+                throw std::runtime_error(
+                    "Pcl must have exactly 3 elements, got " + std::to_string(pcl_.size()));
             }
             auto rcl_ = get_parameter("Rcl").as_double_array();
             if (rcl_.size() != 9) {
-                throw std::runtime_error("Rcl must have exactly 9 elements, got " + std::to_string(rcl_.size()));
+                throw std::runtime_error(
+                    "Rcl must have exactly 9 elements, got " + std::to_string(rcl_.size()));
             }
             V3D pcl(pcl_[0], pcl_[1], pcl_[2]);
             M3D rcl;
-            rcl << rcl_[0], rcl_[1], rcl_[2],
-                   rcl_[3], rcl_[4], rcl_[5],
-                   rcl_[6], rcl_[7], rcl_[8];
+            rcl << rcl_[0], rcl_[1], rcl_[2], rcl_[3], rcl_[4], rcl_[5], rcl_[6], rcl_[7], rcl_[8];
 
             const double cam_fx = get_parameter("cam_fx").as_double();
             const double cam_fy = get_parameter("cam_fy").as_double();
             const double cam_cx = get_parameter("cam_cx").as_double();
             const double cam_cy = get_parameter("cam_cy").as_double();
             // cam_width/cam_height already loaded above
-            const int cam_width  = get_parameter("cam_width").as_int();
-            const int cam_height = get_parameter("cam_height").as_int();
-            const int    patch_size = get_parameter("patch_size").as_int();
-            const int    patch_pyramid_level = get_parameter("patch_pyramid_level").as_int();
+            const int cam_width           = get_parameter("cam_width").as_int();
+            const int cam_height          = get_parameter("cam_height").as_int();
+            const int patch_size          = get_parameter("patch_size").as_int();
+            const int patch_pyramid_level = get_parameter("patch_pyramid_level").as_int();
 
             // 上游 setImuToLidarExtrinsic(extT, extR): Rli=R^T, Pli=-R^T*t
             // yaml extrinsic 与 LIO 相同: p_imu = R_il * p_lidar + t_il
             const M3D Rli = r_li.transpose();
             const V3D Pli = -r_li.transpose() * t_li;
 
-            const bool identity_cam =
-                rcl.isIdentity(1e-6) && pcl.norm() < 1e-6;
+            const bool identity_cam = rcl.isIdentity(1e-6) && pcl.norm() < 1e-6;
             if (identity_cam) {
                 RCLCPP_WARN(get_logger(),
                     "LIVO: Rcl/Pcl still identity/zero — fill real LiDAR-Camera "
                     "extrinsics before trusting visual updates");
             }
             if (cam_width <= 0 || cam_height <= 0 || cam_fx <= 1.0 || cam_fy <= 1.0) {
-                throw std::runtime_error(
-                    "LIVO: invalid camera intrinsics/size (cam_fx/fy/width/height)");
+                throw std::runtime_error("LIVO: invalid camera intrinsics/size "
+                                         "(cam_fx/fy/width/height)");
             }
 
-            vio_manager_.init(cam_fx, cam_fy, cam_cx, cam_cy, cam_width, cam_height,
-                               rcl, pcl, Rli, Pli,
-                               patch_size, patch_pyramid_level, /*grid_size=*/20,
-                               /*normal_en=*/true, /*ncc_en=*/true,
-                               /*img_point_cov=*/100.0, /*ncc_thre=*/0.6,
-                               /*max_iterations=*/5);
+            vio_manager_.init(cam_fx, cam_fy, cam_cx, cam_cy, cam_width, cam_height, rcl, pcl, Rli,
+                Pli, patch_size, patch_pyramid_level, /*grid_size=*/20,
+                /*normal_en=*/true, /*ncc_en=*/true,
+                /*img_point_cov=*/100.0, /*ncc_thre=*/0.6,
+                /*max_iterations=*/5);
             RCLCPP_INFO(get_logger(),
-                "VIO extrinsics: Rli=R_il^T applied; cam %dx%d fx=%.1f fy=%.1f",
-                cam_width, cam_height, cam_fx, cam_fy);
+                "VIO extrinsics: Rli=R_il^T applied; cam %dx%d fx=%.1f fy=%.1f", cam_width,
+                cam_height, cam_fx, cam_fy);
         }
 
         // 降采样参数
@@ -342,7 +331,8 @@ private:
 
         auto layer_init_raw = get_parameter("voxel_map/layer_init_num").as_integer_array();
         voxel_config_.layer_init_num_.clear();
-        for (auto v : layer_init_raw) voxel_config_.layer_init_num_.push_back(static_cast<int>(v));
+        for (auto v : layer_init_raw)
+            voxel_config_.layer_init_num_.push_back(static_cast<int>(v));
         while (voxel_config_.layer_init_num_.size() < 5) {
             voxel_config_.layer_init_num_.push_back(5);
         }
@@ -355,17 +345,18 @@ private:
         voxel_map_.extT_ = t_li;
 
         // PCD
-        pcd_save_en_          = get_parameter("pcd_save_en").as_bool();
-        pcd_save_interval_    = get_parameter("pcd_save_interval").as_int();
-        map_save_path_        = get_parameter("map_save_path").as_string();
-        save_trigger_path_    = get_parameter("map_save_trigger").as_string();
+        pcd_save_en_            = get_parameter("pcd_save_en").as_bool();
+        pcd_save_interval_      = get_parameter("pcd_save_interval").as_int();
+        map_save_path_          = get_parameter("map_save_path").as_string();
+        save_trigger_path_      = get_parameter("map_save_trigger").as_string();
         pcd_save_warmup_frames_ = get_parameter("pcd_save_warmup_frames").as_int();
 
         RCLCPP_INFO(get_logger(), "LiDAR topic: %s", lidar_topic_.c_str());
         RCLCPP_INFO(get_logger(), "IMU   topic: %s", imu_topic_.c_str());
-        RCLCPP_INFO(get_logger(), "VoxelMap: max_layer=%d, voxel_size=%.3f, max_iter=%d, plane_thresh=%.4f",
-                    voxel_config_.max_layer_, voxel_config_.max_voxel_size_,
-                    voxel_config_.max_iterations_, voxel_config_.planner_threshold_);
+        RCLCPP_INFO(get_logger(),
+            "VoxelMap: max_layer=%d, voxel_size=%.3f, max_iter=%d, plane_thresh=%.4f",
+            voxel_config_.max_layer_, voxel_config_.max_voxel_size_, voxel_config_.max_iterations_,
+            voxel_config_.planner_threshold_);
     }
 
     // ── 相机线程管理 ─────────────────────────────────────────────
@@ -377,8 +368,7 @@ private:
 
         auto open_result = camera_->open();
         if (!open_result) {
-            throw std::runtime_error(
-                "LIVO: failed to open camera SHM: " + open_result.error());
+            throw std::runtime_error("LIVO: failed to open camera SHM: " + open_result.error());
         }
         RCLCPP_INFO(get_logger(), "Camera SHM opened, starting capture thread");
 
@@ -404,7 +394,7 @@ private:
                 const auto& err = result.error();
                 if (err.find("timeout") != std::string::npos
                     || err.find("Timeout") != std::string::npos) {
-                    continue;  // timeout: normal, retry
+                    continue; // timeout: normal, retry
                 }
                 // Fatal reader error: log once, terminate worker
                 RCLCPP_ERROR(get_logger(), "Camera SHM fatal read error: %s", err.c_str());
@@ -420,17 +410,12 @@ private:
     void init_subscribers() {
         auto qos = rclcpp::SensorDataQoS();
 
-        sub_lidar_ = create_subscription<sensor_msgs::msg::PointCloud2>(
-            lidar_topic_, qos,
-            [this](const sensor_msgs::msg::PointCloud2::SharedPtr msg) {
-                on_lidar(msg);
-            });
+        sub_lidar_ = create_subscription<sensor_msgs::msg::PointCloud2>(lidar_topic_, qos,
+            [this](const sensor_msgs::msg::PointCloud2::SharedPtr msg) { on_lidar(msg); });
 
-        sub_imu_ = create_subscription<sensor_msgs::msg::Imu>(
-            imu_topic_, rclcpp::QoS(rclcpp::KeepLast(4000)).reliable(),
-            [this](const sensor_msgs::msg::Imu::SharedPtr msg) {
-                on_imu(msg);
-            });
+        sub_imu_ = create_subscription<sensor_msgs::msg::Imu>(imu_topic_,
+            rclcpp::QoS(rclcpp::KeepLast(4000)).reliable(),
+            [this](const sensor_msgs::msg::Imu::SharedPtr msg) { on_imu(msg); });
     }
 
     void init_publishers() {
@@ -446,12 +431,9 @@ private:
             std::lock_guard<std::mutex> lock(imu_buf_mutex_);
             ImuData d;
             d.timestamp = rclcpp::Time(msg->header.stamp).seconds() + imu_time_offset_;
-            d.acc  = {msg->linear_acceleration.x,
-                      msg->linear_acceleration.y,
-                      msg->linear_acceleration.z};
-            d.gyro = {msg->angular_velocity.x,
-                      msg->angular_velocity.y,
-                      msg->angular_velocity.z};
+            d.acc       = { msg->linear_acceleration.x, msg->linear_acceleration.y,
+                msg->linear_acceleration.z };
+            d.gyro = { msg->angular_velocity.x, msg->angular_velocity.y, msg->angular_velocity.z };
             imu_buf_.push_back(d);
             // FIXME (Oracle 架构裁决): 固定 2s wall-clock 窗口对齐上游"处理
             // 完就 pop"语义后发现有隐患——若处理卡顿超过 2s（比如探索大片
@@ -461,8 +443,9 @@ private:
             // 裁剪：只删已经被 undistort_pcl 消费过的样本，留一点 margin
             // 防止 undistort_pcl 内部桥接用的 last_imu_ 被误删。
             const double consumed_before = imu_process_.last_prop_end_time() - 0.1;
-            auto it = imu_buf_.begin();
-            while (it != imu_buf_.end() && it->timestamp < consumed_before) ++it;
+            auto it                      = imu_buf_.begin();
+            while (it != imu_buf_.end() && it->timestamp < consumed_before)
+                ++it;
             if (it != imu_buf_.begin()) imu_buf_.erase(imu_buf_.begin(), it);
         }
         // 若上一帧因 IMU 未追上而挂在 lidar_buf_ 里等待重试，这里顺带
@@ -526,7 +509,7 @@ private:
 
     void process_frame() {
         using clock = std::chrono::high_resolution_clock;
-        auto t0 = clock::now();
+        auto t0     = clock::now();
 
         // ── 1. 窥视（不弹出）LiDAR 帧 ──
         // FIXME (Oracle 架构裁决): 对齐上游 sync_packages() 的 retry 语义——
@@ -538,15 +521,15 @@ private:
         {
             std::lock_guard<std::mutex> lock(lidar_buf_mutex_);
             if (lidar_buf_.empty()) return;
-            lidar_msg = lidar_buf_.front();  // 窥视，暂不 pop
+            lidar_msg = lidar_buf_.front(); // 窥视，暂不 pop
         }
 
         // ── 2. 预处理: ROS PointCloud2 → PointCloudT (raw) ──
         auto raw_cloud = std::make_shared<PointCloudT>();
         preprocess_.process(lidar_msg, raw_cloud);
         if (raw_cloud->empty()) {
-            RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 2000,
-                "Empty point cloud after preprocessing");
+            RCLCPP_WARN_THROTTLE(
+                get_logger(), *get_clock(), 2000, "Empty point cloud after preprocessing");
             // 空点云无法恢复，此帧真正丢弃（非 IMU 未就绪的可重试场景）
             std::lock_guard<std::mutex> lock(lidar_buf_mutex_);
             if (!lidar_buf_.empty()) lidar_buf_.pop_front();
@@ -565,7 +548,7 @@ private:
         MeasureGroup meas;
         meas.lidar_beg_time = frame_beg;
         meas.lidar_end_time = frame_end;
-        meas.lidar = raw_cloud;
+        meas.lidar          = raw_cloud;
 
         if (imu_process_.imu_en) {
             std::lock_guard<std::mutex> lock(imu_buf_mutex_);
@@ -588,8 +571,8 @@ private:
             }
             if (meas.imu.size() < 2) {
                 RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 2000,
-                    "Insufficient IMU data (%zu samples) for frame [%.3f, %.3f]",
-                    meas.imu.size(), frame_beg, frame_end);
+                    "Insufficient IMU data (%zu samples) for frame [%.3f, %.3f]", meas.imu.size(),
+                    frame_beg, frame_end);
                 return;
             }
         }
@@ -602,12 +585,13 @@ private:
 
         // ── 4. IMU 去畸变 ──
         auto feats_undistort = std::make_shared<PointCloudT>();
-        bool imu_ok = imu_process_.process(meas, state_, feats_undistort);
-        if (!imu_ok) { return; }
+        bool imu_ok          = imu_process_.process(meas, state_, feats_undistort);
+        if (!imu_ok) {
+            return;
+        }
 
         if (feats_undistort->empty()) {
-            RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 2000,
-                "Empty undistorted point cloud");
+            RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 2000, "Empty undistorted point cloud");
             return;
         }
 
@@ -620,22 +604,22 @@ private:
             std::unordered_map<uint64_t, size_t> voxel_map;
             for (size_t i = 0; i < feats_undistort->size(); ++i) {
                 const auto& pt = feats_undistort->points[i];
-                int64_t ix = static_cast<int64_t>(std::floor(pt.x * inv_leaf));
-                int64_t iy = static_cast<int64_t>(std::floor(pt.y * inv_leaf));
-                int64_t iz = static_cast<int64_t>(std::floor(pt.z * inv_leaf));
-                uint64_t key = (static_cast<uint64_t>(ix + 32768) << 42)
-                             | (static_cast<uint64_t>(iy + 32768) << 21)
-                             | (static_cast<uint64_t>(iz + 32768));
+                int64_t ix     = static_cast<int64_t>(std::floor(pt.x * inv_leaf));
+                int64_t iy     = static_cast<int64_t>(std::floor(pt.y * inv_leaf));
+                int64_t iz     = static_cast<int64_t>(std::floor(pt.z * inv_leaf));
+                uint64_t key   = (static_cast<uint64_t>(ix + 32768) << 42)
+                    | (static_cast<uint64_t>(iy + 32768) << 21)
+                    | (static_cast<uint64_t>(iz + 32768));
                 if (voxel_map.emplace(key, feats_down_body->size()).second) {
                     feats_down_body->push_back(pt);
                 }
             }
-            feats_down_body->header = feats_undistort->header;
+            feats_down_body->header   = feats_undistort->header;
             feats_down_body->is_dense = false;
         }
 
         int feats_down_size = static_cast<int>(feats_down_body->points.size());
-        auto t_down = clock::now();
+        auto t_down         = clock::now();
 
         // ── 6. 设置 VoxelMapManager 上下文 ──
         voxel_map_.feats_undistort_ = feats_undistort;
@@ -654,8 +638,8 @@ private:
             voxel_map_.state_ = state_;
             voxel_map_.BuildVoxelMap();
             RCLCPP_INFO(get_logger(),
-                "First frame: built voxel map with %d points (%ld root voxels)",
-                feats_down_size, voxel_map_.voxel_map_.size());
+                "First frame: built voxel map with %d points (%ld root voxels)", feats_down_size,
+                voxel_map_.voxel_map_.size());
             return;
         }
 
@@ -675,22 +659,18 @@ private:
         // ── 9. 增量更新体素地图 ──
         // 用更新后的状态重新变换点云，计算世界帧协方差
         auto world_lidar = std::make_shared<PointCloudT>();
-        voxel_map_.TransformLidar(
-            state_.rot_end, state_.pos_end, feats_down_body, world_lidar);
+        voxel_map_.TransformLidar(state_.rot_end, state_.pos_end, feats_down_body, world_lidar);
 
         for (size_t i = 0; i < static_cast<size_t>(feats_down_size); i++) {
-            voxel_map_.pv_list_[i].point_w = V3D(
-                world_lidar->points[i].x,
-                world_lidar->points[i].y,
-                world_lidar->points[i].z);
+            voxel_map_.pv_list_[i].point_w =
+                V3D(world_lidar->points[i].x, world_lidar->points[i].y, world_lidar->points[i].z);
 
             M3D point_crossmat = voxel_map_.cross_mat_list_[i];
-            M3D var = voxel_map_.body_cov_list_[i];
-            var = (state_.rot_end * voxel_map_.extR_) * var
-                  * (state_.rot_end * voxel_map_.extR_).transpose()
-                  + (-point_crossmat) * state_.cov.block<3, 3>(0, 0)
-                    * (-point_crossmat).transpose()
-                  + state_.cov.block<3, 3>(3, 3);
+            M3D var            = voxel_map_.body_cov_list_[i];
+            var                = (state_.rot_end * voxel_map_.extR_) * var
+                                   * (state_.rot_end * voxel_map_.extR_).transpose()
+                + (-point_crossmat) * state_.cov.block<3, 3>(0, 0) * (-point_crossmat).transpose()
+                + state_.cov.block<3, 3>(3, 3);
             voxel_map_.pv_list_[i].var = var;
         }
 
@@ -746,15 +726,14 @@ private:
                 pcd_save_period_counter_++;
                 if (pcd_save_period_counter_ >= pcd_save_interval_) {
                     pcd_save_period_counter_ = 0;
-                    std::string path = map_save_path_;
-                    auto dot = path.rfind(".pcd");
+                    std::string path         = map_save_path_;
+                    auto dot                 = path.rfind(".pcd");
                     if (dot != std::string::npos) {
                         path.insert(dot, "." + std::to_string(pcd_save_seq_++));
                     } else {
                         path += "." + std::to_string(pcd_save_seq_++);
                     }
-                    RCLCPP_INFO(get_logger(),
-                        "Periodic PCD save: %s (%ld points)", path.c_str(),
+                    RCLCPP_INFO(get_logger(), "Periodic PCD save: %s (%ld points)", path.c_str(),
                         pcd_accumulated_.points.size());
                     pcl::io::savePCDFileBinary(path, pcd_accumulated_);
                     pcd_accumulated_.clear();
@@ -765,28 +744,22 @@ private:
         // ── 16. 计时日志 ──
         frame_count_++;
         auto t_total = std::chrono::duration<double>(t4 - t0).count();
-        avg_time_ = avg_time_ * (frame_count_ - 1) / frame_count_
-                    + t_total / frame_count_;
+        avg_time_    = avg_time_ * (frame_count_ - 1) / frame_count_ + t_total / frame_count_;
 
         RCLCPP_INFO(get_logger(),
             "[ LIO ] frame %d | down: %.1fms | ICP: %.1fms | update: %.1fms"
             " | total: %.1fms (avg: %.1fms) | pts: %d/%d/%d",
-            frame_count_,
-            std::chrono::duration<double>(t_down - t0).count() * 1000,
+            frame_count_, std::chrono::duration<double>(t_down - t0).count() * 1000,
             std::chrono::duration<double>(t2 - t1).count() * 1000,
-            std::chrono::duration<double>(t3 - t2).count() * 1000,
-            t_total * 1000,
-            avg_time_ * 1000,
-            static_cast<int>(feats_undistort->size()),
-            feats_down_size,
-            voxel_map_.effct_feat_num_);
+            std::chrono::duration<double>(t3 - t2).count() * 1000, t_total * 1000, avg_time_ * 1000,
+            static_cast<int>(feats_undistort->size()), feats_down_size, voxel_map_.effct_feat_num_);
     }
 
     // ── 发布函数 ────────────────────────────────────────────────
 
     void publish_odometry(double timestamp) {
-        auto odom_msg = nav_msgs::msg::Odometry();
-        odom_msg.header.stamp = rclcpp::Time(static_cast<int64_t>(timestamp * 1e9));
+        auto odom_msg            = nav_msgs::msg::Odometry();
+        odom_msg.header.stamp    = rclcpp::Time(static_cast<int64_t>(timestamp * 1e9));
         odom_msg.header.frame_id = "odom";
         odom_msg.child_frame_id  = "base_link";
 
@@ -806,7 +779,7 @@ private:
 
         // 协方差: state 内部布局 [rot(0-2), pos(3-5)]，
         // nav_msgs/Odometry 要求 [pos(0-2), rot(3-5)]，需重排。
-        constexpr std::array<int, 6> pose_idx{3, 4, 5, 0, 1, 2};
+        constexpr std::array<int, 6> pose_idx { 3, 4, 5, 0, 1, 2 };
         for (int i = 0; i < 6; i++) {
             for (int j = 0; j < 6; j++) {
                 odom_msg.pose.covariance[i * 6 + j] = state_.cov(pose_idx[i], pose_idx[j]);
@@ -815,18 +788,18 @@ private:
         pub_odom_->publish(odom_msg);
     }
 
-    void publish_cloud_world(const PointCloudT::Ptr& cloud,
-                              const builtin_interfaces::msg::Time& stamp) {
+    void publish_cloud_world(
+        const PointCloudT::Ptr& cloud, const builtin_interfaces::msg::Time& stamp) {
         sensor_msgs::msg::PointCloud2 cloud_msg;
         pcl::toROSMsg(*cloud, cloud_msg);
-        cloud_msg.header.stamp = stamp;
+        cloud_msg.header.stamp    = stamp;
         cloud_msg.header.frame_id = "odom";
         pub_cloud_->publish(cloud_msg);
     }
 
     void publish_path(const builtin_interfaces::msg::Time& stamp) {
         geometry_msgs::msg::PoseStamped pose;
-        pose.header.stamp = stamp;
+        pose.header.stamp    = stamp;
         pose.header.frame_id = "odom";
         pose.pose.position.x = state_.pos_end.x();
         pose.pose.position.y = state_.pos_end.y();
@@ -838,7 +811,7 @@ private:
         pose.pose.orientation.y = q.y();
         pose.pose.orientation.z = q.z();
 
-        path_msg_.header.stamp = stamp;
+        path_msg_.header.stamp    = stamp;
         path_msg_.header.frame_id = "odom";
         path_msg_.poses.push_back(pose);
         pub_path_->publish(path_msg_);
@@ -846,9 +819,9 @@ private:
 
     void publish_tf(const builtin_interfaces::msg::Time& stamp) {
         geometry_msgs::msg::TransformStamped tf;
-        tf.header.stamp = stamp;
+        tf.header.stamp    = stamp;
         tf.header.frame_id = "odom";
-        tf.child_frame_id = "base_link";
+        tf.child_frame_id  = "base_link";
 
         tf.transform.translation.x = state_.pos_end.x();
         tf.transform.translation.y = state_.pos_end.y();
@@ -865,17 +838,16 @@ private:
 
     void save_pcd() {
         if (pcd_save_en_ && !pcd_accumulated_.empty()) {
-            RCLCPP_INFO(get_logger(),
-                "Saving %ld points to %s",
-                pcd_accumulated_.points.size(), map_save_path_.c_str());
+            RCLCPP_INFO(get_logger(), "Saving %ld points to %s", pcd_accumulated_.points.size(),
+                map_save_path_.c_str());
             // HACK: 从 ASCII 换成 Binary——长时间建图累积到百万级点时，
             // ASCII 每点一行文本格式化 I/O 耗时和文件体积都数倍于 binary，
             // 手动触发保存场景下用户在等这个操作完成，不该让格式选择成为
             // 瓶颈。Foxglove/PCL/CloudCompare 等下游工具都原生支持读取
             // binary PCD，不存在兼容性代价。
             pcl::io::savePCDFileBinary(map_save_path_, pcd_accumulated_);
-            RCLCPP_INFO(get_logger(), "PCD saved (%ld points, binary).",
-                pcd_accumulated_.points.size());
+            RCLCPP_INFO(
+                get_logger(), "PCD saved (%ld points, binary).", pcd_accumulated_.points.size());
         } else if (pcd_save_en_) {
             RCLCPP_WARN(get_logger(), "PCD save requested but no points accumulated yet.");
         }
@@ -885,76 +857,78 @@ private:
     // 负责 touch 它），存在则立即保存当前累积点云并删除触发文件（避免
     // 下一轮定时器重复触发）。不停止建图，保存完继续累积。
     void check_save_trigger() {
-        namespace fs = std::filesystem;
+        namespace fs                = std::filesystem;
         const fs::path trigger_path = save_trigger_path_;
         std::error_code ec;
-        if (!fs::exists(trigger_path, ec) || ec) { return; }
+        if (!fs::exists(trigger_path, ec) || ec) {
+            return;
+        }
         RCLCPP_INFO(get_logger(), "Save-map trigger detected, saving current map...");
         save_pcd();
         fs::remove(trigger_path, ec);
         if (ec) {
-            RCLCPP_WARN(get_logger(), "Failed to remove save-map trigger file: %s",
-                ec.message().c_str());
+            RCLCPP_WARN(
+                get_logger(), "Failed to remove save-map trigger file: %s", ec.message().c_str());
         }
     }
 
     // ── 成员变量 ─────────────────────────────────────────────────
     std::string lidar_topic_, imu_topic_;
-    int    slam_mode_ = SlamMode::ONLY_LIO;
-    bool   img_en_    = false;
-    double img_time_offset_ = 0.0;
-    double imu_time_offset_ = 0.0;
-    double img_scale_       = 0.5;
-    double filter_size_surf_ = 0.1;
-    bool   pcd_save_en_     = false;
-    int    pcd_save_interval_ = -1;
-    int    pcd_save_seq_      = 0;
-    int    pcd_save_period_counter_ = 0;
+    int slam_mode_               = SlamMode::ONLY_LIO;
+    bool img_en_                 = false;
+    double img_time_offset_      = 0.0;
+    double imu_time_offset_      = 0.0;
+    double img_scale_            = 0.5;
+    double filter_size_surf_     = 0.1;
+    bool pcd_save_en_            = false;
+    int pcd_save_interval_       = -1;
+    int pcd_save_seq_            = 0;
+    int pcd_save_period_counter_ = 0;
     std::string map_save_path_;
     std::string save_trigger_path_ = "/tmp/fast_livo2_save_map";
     rclcpp::TimerBase::SharedPtr save_trigger_timer_;
     int pcd_save_warmup_frames_ = 30;
 
-    Preprocess  preprocess_;
-    ImuProcess  imu_process_;
+    Preprocess preprocess_;
+    ImuProcess imu_process_;
 
     // ── SHM 相机（仅 LIVO 模式）──
-    std::unique_ptr<ShmCamera>    camera_;            // SharedFrameReader adapter
-    std::thread                   camera_thread_;     // 采集线程
-    std::atomic<bool>             camera_running_{false};
-    CameraFrameQueue              camera_queue_{5};   // bounded ≤5, at-most-once per sequence
+    std::unique_ptr<ShmCamera> camera_; // SharedFrameReader adapter
+    std::thread camera_thread_;         // 采集线程
+    std::atomic<bool> camera_running_ { false };
+    CameraFrameQueue camera_queue_ { 5 }; // bounded ≤5, at-most-once per sequence
 
     // 缓冲区（各自有独立互斥锁）
     std::mutex imu_buf_mutex_;
     std::mutex lidar_buf_mutex_;
-    std::vector<ImuData, Eigen::aligned_allocator<ImuData>>  imu_buf_;
-    std::deque<sensor_msgs::msg::PointCloud2::SharedPtr>    lidar_buf_;
+    std::vector<ImuData, Eigen::aligned_allocator<ImuData>> imu_buf_;
+    std::deque<sensor_msgs::msg::PointCloud2::SharedPtr> lidar_buf_;
 
     // 体素地图管理器（替换原来的 ikd-Tree）
-    VoxelMapManager  voxel_map_;
-    VoxelMapConfig   voxel_config_;
-    StatesGroup      state_;             // ESIKF 状态（持续跨帧更新）
-    bool             lidar_map_inited_ = false;
+    VoxelMapManager voxel_map_;
+    VoxelMapConfig voxel_config_;
+    StatesGroup state_; // ESIKF 状态（持续跨帧更新）
+    bool lidar_map_inited_ = false;
 
     // 视觉直接法前端（仅 LIVO 模式启用）
-    VIOManager       vio_manager_;
+    VIOManager vio_manager_;
 
     // 发布者 & TF
     rclcpp::Subscription<sensor_msgs::msg::PointCloud2>::SharedPtr sub_lidar_;
-    rclcpp::Subscription<sensor_msgs::msg::Imu>::SharedPtr         sub_imu_;
-    rclcpp::Publisher<nav_msgs::msg::Odometry>::SharedPtr          pub_odom_;
-    rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr    pub_cloud_;
-    rclcpp::Publisher<nav_msgs::msg::Path>::SharedPtr              pub_path_;
-    std::unique_ptr<tf2_ros::TransformBroadcaster>                 tf_broadcaster_;
+    rclcpp::Subscription<sensor_msgs::msg::Imu>::SharedPtr sub_imu_;
+    rclcpp::Publisher<nav_msgs::msg::Odometry>::SharedPtr pub_odom_;
+    rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr pub_cloud_;
+    rclcpp::Publisher<nav_msgs::msg::Path>::SharedPtr pub_path_;
+    std::unique_ptr<tf2_ros::TransformBroadcaster> tf_broadcaster_;
     nav_msgs::msg::Path path_msg_;
 
     // PCD 累积
-    PointCloudT         pcd_accumulated_;
-    int                 frame_count_ = 0;
-    double              avg_time_    = 0.0;
+    PointCloudT pcd_accumulated_;
+    int frame_count_ = 0;
+    double avg_time_ = 0.0;
 };
 
-}  // namespace radar::fast_livo2
+} // namespace radar::fast_livo2
 
 int main(int argc, char** argv) {
     rclcpp::init(argc, argv);

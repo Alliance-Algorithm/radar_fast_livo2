@@ -578,9 +578,9 @@ void VoxelMapManager::StateEstimation(StatesGroup& state_propagat) {
             // 保留：(I-G)*P 理论上必然对称，这里只是修正浮点乘法的舍入
             // 误差，是标准数值实践，不属于"掩盖"，与上游行为等价（上游没
             // 显式写但用的矩阵库对同一运算的舍入误差量级相同，不影响结果）。
-            state_.cov.block<DIM_STATE, DIM_STATE>(0, 0) =
-                0.5 * (state_.cov.block<DIM_STATE, DIM_STATE>(0, 0)
-                     + state_.cov.block<DIM_STATE, DIM_STATE>(0, 0).transpose());
+            state_.cov.block<DIM_STATE, DIM_STATE>(0, 0) = 0.5
+                * (state_.cov.block<DIM_STATE, DIM_STATE>(0, 0)
+                    + state_.cov.block<DIM_STATE, DIM_STATE>(0, 0).transpose());
 
             position_last_ = state_.pos_end;
             EKF_stop_flg   = true;
@@ -639,7 +639,7 @@ void VoxelMapManager::BuildVoxelMap() {
         calcBodyCov(point_this, static_cast<float>(config_setting_.dept_err_),
             static_cast<float>(config_setting_.beam_err_), var);
 
-        V3D point_imu = extR_ * point_this + extT_;
+        V3D point_imu      = extR_ * point_this + extT_;
         M3D point_crossmat = skewSym(point_imu);
 
         // world-frame 协方差: sensor noise + rotation uncertainty + translation uncertainty
