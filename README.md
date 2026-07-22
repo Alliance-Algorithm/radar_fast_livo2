@@ -22,20 +22,27 @@ include/radar_fast_livo2/
   esikf_state.hpp      ESIKF 状态定义（StatesGroup，18维: rot/pos/vel/bg/ba/gravity）
   imu_processing.hpp    IMU 处理器接口
   preprocess.hpp        点云预处理器接口
+  shm_camera.hpp        HIK 相机 SHM 适配器（CameraFrame + ShmCamera）
+  camera_frame_queue.hpp 相机帧队列（at-most-once、限长、最近匹配消费）
   voxel_map.hpp          体素地图管理器接口
   vio.hpp                视觉直接法管理器接口
 src/
   livmapper_node.cpp    ROS2 节点主入口，管线编排
   imu_processing.cpp    IMU 静止初始化 + 正向传播 + 去畸变
   preprocess.cpp         点云预处理（含传感器类型分支）
+  shm_camera.cpp         SHM 相机适配器实现（BGR8→gray 转换）
+  camera_frame_queue.cpp  相机帧队列实现
   voxel_map.cpp          ESIKF 状态估计 + 增量体素地图
   vio.cpp                 视觉直接法（patch 投影/仿射变换/NCC/光度误差）
+test/
+  test_shm_camera.cpp   ShmCamera 单元测试（几何/灰度/时间戳/队列语义）
 config/odin_livo2.yaml   参数配置（本文件名保留原始适配对象命名，内容通用）
 ```
 
 ## 使用方法
 
 ```bash
+# 先确保 hikcamera SDK 已编译安装（third-party/hikcamera_sdk）
 colcon build --packages-select radar_fast_livo2
 source install/setup.bash
 ros2 run radar_fast_livo2 radar_fast_livo2_node --ros-args \
@@ -48,10 +55,22 @@ topic：
 |---|---|---|---|
 | 订阅 | `lidar_topic`（参数） | `sensor_msgs/PointCloud2` | 原始点云 |
 | 订阅 | `imu_topic`（参数） | `sensor_msgs/Imu` | IMU（建议 ≥200Hz） |
-| 订阅 | `img_topic`（参数，仅 LIVO 模式） | `sensor_msgs/Image` | 相机图像 |
+| 共享内存 | `camera/shm_name`（参数，仅 LIVO 模式） | POSIX SHM (hikcamera SDK) | 相机 BGR8 → gray CV_8UC1 @2736×1824 |
 | 发布 | `/fast_livo2/odom` | `nav_msgs/Odometry` | 位姿 + 速度 + 协方差 |
 | 发布 | `/fast_livo2/cloud_world` | `sensor_msgs/PointCloud2` | 世界系当前帧点云 |
 | 发布 | `/fast_livo2/path` | `nav_msgs/Path` | 累积轨迹 |
+
+> **相机输入不再使用 ROS Image topic。** LIVO 模式通过 `hikcamera::SharedFrameReader`
+> 从 POSIX 共享内存直接读取 HIK 相机帧（需先启动 `hikcamera_ros_driver` 或
+> writer 进程创建 SHM 段）。默认 SHM 名 `/hikcamera_shm`，全分辨率 5472×3648
+> BGR8 输入，自动转灰度并降采样到 2736×1824 CV_8UC1。
+> 相机内参 `cam_fx/fy/cx/cy` 请用目标分辨率标定值或全分辨率值 ×0.5 填入。
+>
+> **时间域**: `host_monotonic_ns` 是 `std::chrono::steady_clock` epoch，
+> 不是 Odin 设备时钟或 ROS clock。LIVO 模式下相机帧时间戳（`steady_clock`）
+> 与 LiDAR/IMU 时间戳（Odin 设备时钟域）不在同一时钟域，需要通过
+> `img_time_offset` 做域间映射。默认值 `0.0` 仅为占位，在接入真实相机前
+> 必须实测标定该偏移量。不使用 device_timestamp_ticks 做时间转换。
 
 关键参数（`slam_mode`: 1=ONLY_LIO 纯雷达惯性，2=LIVO 视觉+雷达+惯性融合）见
 `config/odin_livo2.yaml` 内注释。**首次接入新传感器强烈建议先用 `slam_mode: 1`
