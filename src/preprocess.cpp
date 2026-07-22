@@ -8,19 +8,23 @@ namespace radar::fast_livo2 {
 
 Preprocess::Preprocess() = default;
 
-void Preprocess::process(const sensor_msgs::msg::PointCloud2::ConstSharedPtr& msg,
-                         PointCloudT::Ptr& out) {
+void Preprocess::process(
+    const sensor_msgs::msg::PointCloud2::ConstSharedPtr& msg, PointCloudT::Ptr& out) {
     out->clear();
     switch (lidar_type) {
-        case LidarType::ODIN1: odin1_handler(msg, out); break;
-        case LidarType::L515:  l515_handler(msg, out);  break;
-        case LidarType::VELO16:
-        case LidarType::OUST64:
-        default:
-            RCLCPP_WARN_ONCE(rclcpp::get_logger("radar_fast_livo2"),
-                "Unsupported lidar_type %d, using odin1_handler fallback", lidar_type);
-            odin1_handler(msg, out);
-            break;
+    case LidarType::ODIN1:
+        odin1_handler(msg, out);
+        break;
+    case LidarType::L515:
+        l515_handler(msg, out);
+        break;
+    case LidarType::VELO16:
+    case LidarType::OUST64:
+    default:
+        RCLCPP_WARN_ONCE(rclcpp::get_logger("radar_fast_livo2"),
+            "Unsupported lidar_type %d, using odin1_handler fallback", lidar_type);
+        odin1_handler(msg, out);
+        break;
     }
 }
 
@@ -31,8 +35,8 @@ void Preprocess::process(const sensor_msgs::msg::PointCloud2::ConstSharedPtr& ms
 // 改成直接按 msg->fields 里的偏移量用 memcpy 读原始字节，memcpy 对任意对齐
 // 都安全，且不依赖 PCL 点类型注册，同时更贴近协议本身（字段偏移来自消息
 // 元数据而非编译期假设，设备端字段顺序变化也不会导致静默错位）。
-void Preprocess::odin1_handler(const sensor_msgs::msg::PointCloud2::ConstSharedPtr& msg,
-                                PointCloudT::Ptr& out) {
+void Preprocess::odin1_handler(
+    const sensor_msgs::msg::PointCloud2::ConstSharedPtr& msg, PointCloudT::Ptr& out) {
     uint32_t off_x = 0, off_y = 4, off_z = 8;
     uint32_t off_intensity = 12, off_confidence = 13, off_offset_time = 15;
     for (const auto& f : msg->fields) {
@@ -45,20 +49,20 @@ void Preprocess::odin1_handler(const sensor_msgs::msg::PointCloud2::ConstSharedP
     }
 
     const uint32_t point_step = msg->point_step;
-    const uint32_t n_points = msg->width * msg->height;
-    if (point_step == 0 || n_points == 0) { return; }
+    const uint32_t n_points   = msg->width * msg->height;
+    if (point_step == 0 || n_points == 0) {
+        return;
+    }
 
     // Bounds check: ensure field offsets don't exceed point_step
-    const uint32_t max_needed = std::max({off_x + 4, off_y + 4, off_z + 4,
-                                          off_intensity + 1, off_confidence + 2,
-                                          off_offset_time + 4});
+    const uint32_t max_needed = std::max({ off_x + 4, off_y + 4, off_z + 4, off_intensity + 1,
+        off_confidence + 2, off_offset_time + 4 });
     if (point_step < max_needed) {
         RCLCPP_ERROR_ONCE(rclcpp::get_logger("radar_fast_livo2"),
             "Point step %u too small for fields (need >= %u). "
             "x=%u y=%u z=%u intensity=%u confidence=%u offset_time=%u",
-            point_step, max_needed,
-            off_x, off_y, off_z,
-            off_intensity, off_confidence, off_offset_time);
+            point_step, max_needed, off_x, off_y, off_z, off_intensity, off_confidence,
+            off_offset_time);
         return;
     }
 
@@ -103,16 +107,16 @@ void Preprocess::odin1_handler(const sensor_msgs::msg::PointCloud2::ConstSharedP
         pt.y         = y;
         pt.z         = z;
         pt.intensity = static_cast<float>(intensity);
-        pt.curvature = 0.0f;  // 全局曝光面阵，无帧内时间偏移（同 L515 路径）
+        pt.curvature = 0.0f; // 全局曝光面阵，无帧内时间偏移（同 L515 路径）
         out->push_back(pt);
     }
 
-    out->header = pcl_conversions::toPCL(msg->header);
+    out->header   = pcl_conversions::toPCL(msg->header);
     out->is_dense = false;
 }
 
-void Preprocess::l515_handler(const sensor_msgs::msg::PointCloud2::ConstSharedPtr& msg,
-                               PointCloudT::Ptr& out) {
+void Preprocess::l515_handler(
+    const sensor_msgs::msg::PointCloud2::ConstSharedPtr& msg, PointCloudT::Ptr& out) {
     // Intel L515：标准 PointXYZRGB，无 offset_time，无曝光去畸变
     pcl::PointCloud<pcl::PointXYZRGB> raw;
     pcl::fromROSMsg(*msg, raw);
@@ -134,12 +138,12 @@ void Preprocess::l515_handler(const sensor_msgs::msg::PointCloud2::ConstSharedPt
         pt.y         = p.y;
         pt.z         = p.z;
         pt.intensity = 0.0f;
-        pt.curvature = 0.0f;  // 面阵同时曝光，无帧内时间偏移
+        pt.curvature = 0.0f; // 面阵同时曝光，无帧内时间偏移
         out->push_back(pt);
     }
 
-    out->header = pcl_conversions::toPCL(msg->header);
+    out->header   = pcl_conversions::toPCL(msg->header);
     out->is_dense = false;
 }
 
-}  // namespace radar::fast_livo2
+} // namespace radar::fast_livo2

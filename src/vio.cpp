@@ -12,13 +12,19 @@
 namespace radar::fast_livo2 {
 
 void VIOManager::init(double fx, double fy, double cx, double cy, int width, int height,
-                       const M3D& Rcl, const V3D& Pcl, const M3D& Rli, const V3D& Pli,
-                       int patch_size, int patch_pyramid_level, int grid_size,
-                       bool normal_en, bool ncc_en, double img_point_cov, double ncc_thre,
-                       int max_iterations) {
-    fx_ = fx; fy_ = fy; cx_ = cx; cy_ = cy;
-    width_ = width; height_ = height;
-    Rcl_ = Rcl; Pcl_ = Pcl; Rli_ = Rli; Pli_ = Pli;
+    const M3D& Rcl, const V3D& Pcl, const M3D& Rli, const V3D& Pli, int patch_size,
+    int patch_pyramid_level, int grid_size, bool normal_en, bool ncc_en, double img_point_cov,
+    double ncc_thre, int max_iterations) {
+    fx_     = fx;
+    fy_     = fy;
+    cx_     = cx;
+    cy_     = cy;
+    width_  = width;
+    height_ = height;
+    Rcl_    = Rcl;
+    Pcl_    = Pcl;
+    Rli_    = Rli;
+    Pli_    = Pli;
 
     patch_size_          = patch_size;
     patch_pyramid_level_ = patch_pyramid_level;
@@ -36,10 +42,10 @@ void VIOManager::init(double fx, double fy, double cx, double cy, int width, int
     Pci_ = Rcl_ * Pli_ + Pcl_;
 
     Jdphi_dR_ = Rci_;
-    V3D Pic = -Rci_.transpose() * Pci_;
-    Jdp_dR_  = -Rci_ * skewSym(Pic);
+    V3D Pic   = -Rci_.transpose() * Pci_;
+    Jdp_dR_   = -Rci_ * skewSym(Pic);
 
-    grid_n_width_  = std::max(1, width_  / grid_size_ + 1);
+    grid_n_width_  = std::max(1, width_ / grid_size_ + 1);
     grid_n_height_ = std::max(1, height_ / grid_size_ + 1);
     last_G_.setZero();
     last_G_valid_ = false;
@@ -56,12 +62,11 @@ VOXEL_LOCATION VIOManager::worldToVisualVoxel(const V3D& p_w) const {
     return VOXEL_LOCATION(axis(p_w.x()), axis(p_w.y()), axis(p_w.z()));
 }
 
-bool VIOManager::isDepthContinuous(const cv::Mat& depth_img,
-                                   const Eigen::Vector2d& pc,
-                                   float pt_depth) const {
+bool VIOManager::isDepthContinuous(
+    const cv::Mat& depth_img, const Eigen::Vector2d& pc, float pt_depth) const {
     if (depth_img.empty() || depth_img.type() != CV_32FC1) return true;
-    const int u0 = static_cast<int>(pc.x());
-    const int v0 = static_cast<int>(pc.y());
+    const int u0   = static_cast<int>(pc.x());
+    const int v0   = static_cast<int>(pc.y());
     const int half = patch_size_half_;
     for (int v = v0 - half; v <= v0 + half; ++v) {
         if (v < 0 || v >= depth_img.rows) continue;
@@ -83,19 +88,19 @@ bool VIOManager::isDepthContinuous(const cv::Mat& depth_img,
 // π(P) = [fx*X/Z+cx, fy*Y/Z+cy]
 // ══════════════════════════════════════════════════════════════════
 bool VIOManager::computeProjectionJacobian(const V3D& p, Eigen::Matrix<double, 2, 3>& J) const {
-    constexpr double kMinCamDepth = 1e-3;  // 1mm，低于此值视为退化/相机后方
+    constexpr double kMinCamDepth = 1e-3; // 1mm，低于此值视为退化/相机后方
     if (p.z() < kMinCamDepth) {
         J.setZero();
         return false;
     }
     const double z_inv   = 1.0 / p.z();
     const double z_inv_2 = z_inv * z_inv;
-    J(0, 0) = fx_ * z_inv;
-    J(0, 1) = 0.0;
-    J(0, 2) = -fx_ * p.x() * z_inv_2;
-    J(1, 0) = 0.0;
-    J(1, 1) = fy_ * z_inv;
-    J(1, 2) = -fy_ * p.y() * z_inv_2;
+    J(0, 0)              = fx_ * z_inv;
+    J(0, 1)              = 0.0;
+    J(0, 2)              = -fx_ * p.x() * z_inv_2;
+    J(1, 0)              = 0.0;
+    J(1, 1)              = fy_ * z_inv;
+    J(1, 2)              = -fy_ * p.y() * z_inv_2;
     return true;
 }
 
@@ -103,25 +108,25 @@ bool VIOManager::computeProjectionJacobian(const V3D& p, Eigen::Matrix<double, 2
 // getImagePatch — 双线性插值提取 patch（任意金字塔层）
 // 原始来源: FAST-LIVO2/src/vio.cpp VIOManager::getImagePatch
 // ══════════════════════════════════════════════════════════════════
-void VIOManager::getImagePatch(const cv::Mat& img, const Eigen::Vector2d& pc,
-                                float* patch_tmp, int level) const {
-    const int scale = 1 << level;
-    const int u_ref_i = static_cast<int>(std::floor(pc.x() / scale)) * scale;
-    const int v_ref_i = static_cast<int>(std::floor(pc.y() / scale)) * scale;
+void VIOManager::getImagePatch(
+    const cv::Mat& img, const Eigen::Vector2d& pc, float* patch_tmp, int level) const {
+    const int scale      = 1 << level;
+    const int u_ref_i    = static_cast<int>(std::floor(pc.x() / scale)) * scale;
+    const int v_ref_i    = static_cast<int>(std::floor(pc.y() / scale)) * scale;
     const float subpix_u = static_cast<float>(pc.x() - u_ref_i) / scale;
     const float subpix_v = static_cast<float>(pc.y() - v_ref_i) / scale;
-    const float w_tl = (1.0f - subpix_u) * (1.0f - subpix_v);
-    const float w_tr = subpix_u * (1.0f - subpix_v);
-    const float w_bl = (1.0f - subpix_u) * subpix_v;
-    const float w_br = subpix_u * subpix_v;
+    const float w_tl     = (1.0f - subpix_u) * (1.0f - subpix_v);
+    const float w_tr     = subpix_u * (1.0f - subpix_v);
+    const float w_bl     = (1.0f - subpix_u) * subpix_v;
+    const float w_br     = subpix_u * subpix_v;
 
     for (int x = 0; x < patch_size_; x++) {
         const uint8_t* row = img.ptr<uint8_t>(v_ref_i - patch_size_half_ * scale + x * scale)
-                            + (u_ref_i - patch_size_half_ * scale);
+            + (u_ref_i - patch_size_half_ * scale);
         for (int y = 0; y < patch_size_; y++, row += scale) {
-            patch_tmp[patch_size_total_ * level + x * patch_size_ + y] =
-                w_tl * row[0] + w_tr * row[scale]
-              + w_bl * row[scale * img.cols] + w_br * row[scale * img.cols + scale];
+            patch_tmp[patch_size_total_ * level + x * patch_size_ + y] = w_tl * row[0]
+                + w_tr * row[scale] + w_bl * row[scale * img.cols]
+                + w_br * row[scale * img.cols + scale];
         }
     }
 }
@@ -133,11 +138,10 @@ void VIOManager::getImagePatch(const cv::Mat& img, const Eigen::Vector2d& pc,
 // 取参考 patch 中心 + 两个半径偏移点，反投影到 3D（假设与中心同深度），
 // 变换到当前帧，重新投影，差分得到 2×2 warp 矩阵。
 // ══════════════════════════════════════════════════════════════════
-void VIOManager::getWarpMatrixAffine(
-    const VIOManager& self, const Eigen::Vector2d& px_ref, const Eigen::Vector3d& f_ref,
-    double depth_ref, const M3D& R_cur_ref, const V3D& t_cur_ref,
+void VIOManager::getWarpMatrixAffine(const VIOManager& self, const Eigen::Vector2d& px_ref,
+    const Eigen::Vector3d& f_ref, double depth_ref, const M3D& R_cur_ref, const V3D& t_cur_ref,
     int level_ref, int pyramid_level, int halfpatch_size, Eigen::Matrix2d& A_cur_ref) {
-    const V3D xyz_ref = f_ref * depth_ref;
+    const V3D xyz_ref  = f_ref * depth_ref;
     const double scale = static_cast<double>(1 << level_ref) * (1 << pyramid_level);
 
     V3D xyz_du_ref = self.cam2world(px_ref + Eigen::Vector2d(halfpatch_size, 0) * scale);
@@ -145,9 +149,9 @@ void VIOManager::getWarpMatrixAffine(
     xyz_du_ref *= xyz_ref.z() / xyz_du_ref.z();
     xyz_dv_ref *= xyz_ref.z() / xyz_dv_ref.z();
 
-    const Eigen::Vector2d px_cur = self.world2cam(R_cur_ref * xyz_ref     + t_cur_ref);
-    const Eigen::Vector2d px_du  = self.world2cam(R_cur_ref * xyz_du_ref  + t_cur_ref);
-    const Eigen::Vector2d px_dv  = self.world2cam(R_cur_ref * xyz_dv_ref  + t_cur_ref);
+    const Eigen::Vector2d px_cur = self.world2cam(R_cur_ref * xyz_ref + t_cur_ref);
+    const Eigen::Vector2d px_du  = self.world2cam(R_cur_ref * xyz_du_ref + t_cur_ref);
+    const Eigen::Vector2d px_dv  = self.world2cam(R_cur_ref * xyz_dv_ref + t_cur_ref);
 
     A_cur_ref.col(0) = (px_du - px_cur) / halfpatch_size;
     A_cur_ref.col(1) = (px_dv - px_cur) / halfpatch_size;
@@ -158,20 +162,19 @@ void VIOManager::getWarpMatrixAffine(
 // 原始来源: FAST-LIVO2/src/vio.cpp VIOManager::getWarpMatrixAffineHomography
 // H = R_cur_ref * (n·p * I - t * n^T)，t = 当前帧到参考帧的平移
 // ══════════════════════════════════════════════════════════════════
-void VIOManager::getWarpMatrixAffineHomography(
-    const Eigen::Vector2d& px_ref, const Eigen::Vector3d& xyz_ref,
-    const Eigen::Vector3d& normal_ref, const M3D& R_cur_ref, const V3D& t_cur_ref,
-    int level_ref, Eigen::Matrix2d& A_cur_ref) const {
+void VIOManager::getWarpMatrixAffineHomography(const Eigen::Vector2d& px_ref,
+    const Eigen::Vector3d& xyz_ref, const Eigen::Vector3d& normal_ref, const M3D& R_cur_ref,
+    const V3D& t_cur_ref, int level_ref, Eigen::Matrix2d& A_cur_ref) const {
     // t_cur_ref 变换定义为 p_cur = R_cur_ref * p_ref + t_cur_ref，
     // 其逆变换的平移部分 = -R_cur_ref^T * t_cur_ref
     const V3D t = -R_cur_ref.transpose() * t_cur_ref;
-    const M3D H_cur_ref = R_cur_ref
-        * (normal_ref.dot(xyz_ref) * M3D::Identity() - t * normal_ref.transpose());
+    const M3D H_cur_ref =
+        R_cur_ref * (normal_ref.dot(xyz_ref) * M3D::Identity() - t * normal_ref.transpose());
 
     constexpr int kHalfPatchSize = 4;
-    const double scale = static_cast<double>(1 << level_ref);
-    const V3D f_du_ref = cam2world(px_ref + Eigen::Vector2d(kHalfPatchSize, 0) * scale);
-    const V3D f_dv_ref = cam2world(px_ref + Eigen::Vector2d(0, kHalfPatchSize) * scale);
+    const double scale           = static_cast<double>(1 << level_ref);
+    const V3D f_du_ref           = cam2world(px_ref + Eigen::Vector2d(kHalfPatchSize, 0) * scale);
+    const V3D f_dv_ref           = cam2world(px_ref + Eigen::Vector2d(0, kHalfPatchSize) * scale);
 
     const V3D f_cur    = H_cur_ref * xyz_ref;
     const V3D f_du_cur = H_cur_ref * f_du_ref;
@@ -190,23 +193,23 @@ void VIOManager::getWarpMatrixAffineHomography(
 // 原始来源: FAST-LIVO2/src/vio.cpp VIOManager::warpAffine
 // ══════════════════════════════════════════════════════════════════
 void VIOManager::warpAffine(const Eigen::Matrix2d& A_cur_ref, const cv::Mat& img_ref,
-                             const Eigen::Vector2d& px_ref, int level_ref, int search_level,
-                             int pyramid_level, int halfpatch_size, float* patch) const {
-    const int patch_size = halfpatch_size * 2;
+    const Eigen::Vector2d& px_ref, int level_ref, int search_level, int pyramid_level,
+    int halfpatch_size, float* patch) const {
+    const int patch_size            = halfpatch_size * 2;
     const Eigen::Matrix2f A_ref_cur = A_cur_ref.inverse().cast<float>();
     if (std::isnan(A_ref_cur(0, 0))) return;
 
     for (int y = 0; y < patch_size; ++y) {
         for (int x = 0; x < patch_size; ++x) {
-            Eigen::Vector2f px_patch(static_cast<float>(x - halfpatch_size),
-                                      static_cast<float>(y - halfpatch_size));
+            Eigen::Vector2f px_patch(
+                static_cast<float>(x - halfpatch_size), static_cast<float>(y - halfpatch_size));
             px_patch *= static_cast<float>(1 << search_level);
             px_patch *= static_cast<float>(1 << pyramid_level);
             const Eigen::Vector2f px = A_ref_cur * px_patch + px_ref.cast<float>();
 
             float* dst = &patch[patch_size_total_ * pyramid_level + y * patch_size + x];
-            if (px.x() < 0 || px.y() < 0
-                || px.x() >= img_ref.cols - 1 || px.y() >= img_ref.rows - 1) {
+            if (px.x() < 0 || px.y() < 0 || px.x() >= img_ref.cols - 1
+                || px.y() >= img_ref.rows - 1) {
                 *dst = 0.0f;
                 continue;
             }
@@ -215,8 +218,8 @@ void VIOManager::warpAffine(const Eigen::Matrix2d& A_cur_ref, const cv::Mat& img
             const float ax = px.x() - xi, ay = px.y() - yi;
             const uint8_t* row0 = img_ref.ptr<uint8_t>(yi) + xi;
             const uint8_t* row1 = img_ref.ptr<uint8_t>(yi + 1) + xi;
-            *dst = (1 - ax) * (1 - ay) * row0[0] + ax * (1 - ay) * row0[1]
-                 + (1 - ax) * ay       * row1[0] + ax * ay       * row1[1];
+            *dst = (1 - ax) * (1 - ay) * row0[0] + ax * (1 - ay) * row0[1] + (1 - ax) * ay * row1[0]
+                + ax * ay * row1[1];
         }
     }
 }
@@ -227,7 +230,7 @@ void VIOManager::warpAffine(const Eigen::Matrix2d& A_cur_ref, const cv::Mat& img
 // ══════════════════════════════════════════════════════════════════
 int VIOManager::getBestSearchLevel(const Eigen::Matrix2d& A_cur_ref, int max_level) {
     int search_level = 0;
-    double D = A_cur_ref.determinant();
+    double D         = A_cur_ref.determinant();
     while (D > 3.0 && search_level < max_level) {
         search_level += 1;
         D *= 0.25;
@@ -235,10 +238,6 @@ int VIOManager::getBestSearchLevel(const Eigen::Matrix2d& A_cur_ref, int max_lev
     return search_level;
 }
 
-// ══════════════════════════════════════════════════════════════════
-// calculateNCC — 归一化互相关（patch 质量评分）
-// 原始来源: FAST-LIVO2/src/vio.cpp VIOManager::calculateNCC
-// ══════════════════════════════════════════════════════════════════
 // ══════════════════════════════════════════════════════════════════
 // cropAroundPixel — 裁剪 Feature::img_ 存储区域（避免整帧 clone）
 //
@@ -250,16 +249,16 @@ int VIOManager::getBestSearchLevel(const Eigen::Matrix2d& A_cur_ref, int max_lev
 // 且远小于整帧 clone（~1MB → ~9KB/观测）。裁剪越界时 warpAffine 已有
 // 边界检查会写 0（见 :168-172），越界只降质不崩溃。
 // ══════════════════════════════════════════════════════════════════
-cv::Mat VIOManager::cropAroundPixel(const cv::Mat& img, const Eigen::Vector2d& pc,
-                                     Eigen::Vector2i& origin_out) const {
+cv::Mat VIOManager::cropAroundPixel(
+    const cv::Mat& img, const Eigen::Vector2d& pc, Eigen::Vector2i& origin_out) const {
     constexpr int kFeatureCropRadius = 48;
-    const int cx_px = static_cast<int>(std::lround(pc.x()));
-    const int cy_px = static_cast<int>(std::lround(pc.y()));
-    const int ox = std::clamp(cx_px - kFeatureCropRadius, 0, img.cols - 1);
-    const int oy = std::clamp(cy_px - kFeatureCropRadius, 0, img.rows - 1);
-    const int ex = std::clamp(cx_px + kFeatureCropRadius, 1, img.cols);
-    const int ey = std::clamp(cy_px + kFeatureCropRadius, 1, img.rows);
-    origin_out = Eigen::Vector2i(ox, oy);
+    const int cx_px                  = static_cast<int>(std::lround(pc.x()));
+    const int cy_px                  = static_cast<int>(std::lround(pc.y()));
+    const int ox                     = std::clamp(cx_px - kFeatureCropRadius, 0, img.cols - 1);
+    const int oy                     = std::clamp(cy_px - kFeatureCropRadius, 0, img.rows - 1);
+    const int ex                     = std::clamp(cx_px + kFeatureCropRadius, 1, img.cols);
+    const int ey                     = std::clamp(cy_px + kFeatureCropRadius, 1, img.rows);
+    origin_out                       = Eigen::Vector2i(ox, oy);
     return img(cv::Rect(ox, oy, ex - ox, ey - oy)).clone();
 }
 
@@ -289,8 +288,8 @@ void VIOManager::resetGrid() {
 }
 
 // retrieve: 当前 scan 体素索引 + 深度连续性 + 网格最近距离（对齐上游主干）
-void VIOManager::retrieveFromVisualSparseMap(
-    const cv::Mat& img, const std::vector<pointWithVar>& pg,
+void VIOManager::retrieveFromVisualSparseMap(const cv::Mat& img,
+    const std::vector<pointWithVar>& pg,
     const std::unordered_map<VOXEL_LOCATION, std::unique_ptr<VoxelOctoTree>>& /*plane_map*/) {
     if (feat_map_.empty()) {
         visual_submap_.clear();
@@ -300,7 +299,7 @@ void VIOManager::retrieveFromVisualSparseMap(
 
     resetGrid();
     visual_submap_.clear();
-    const int boundary = patch_size_half_ * (1 << (patch_pyramid_level_ - 1)) + 1;
+    const int boundary  = patch_size_half_ * (1 << (patch_pyramid_level_ - 1)) + 1;
     const V3D cam_pos_w = -Rcw_.transpose() * Pcw_;
 
     // 1) 当前 LiDAR 点 → depth 图 + 相关 visual voxel 键
@@ -310,14 +309,14 @@ void VIOManager::retrieveFromVisualSparseMap(
 
     for (const auto& pv : pg) {
         const VOXEL_LOCATION key = worldToVisualVoxel(pv.point_w);
-        sub_feat_map[key] = 0;
+        sub_feat_map[key]        = 0;
 
         const V3D p_cam = Rcw_ * pv.point_w + Pcw_;
         if (p_cam.z() <= 0.05) continue;
         const Eigen::Vector2d pc = world2cam(p_cam);
         if (!isInFrame(pc, 1)) continue;
-        const int u = static_cast<int>(pc.x());
-        const int v = static_cast<int>(pc.y());
+        const int u               = static_cast<int>(pc.x());
+        const int v               = static_cast<int>(pc.y());
         depth_img.at<float>(v, u) = static_cast<float>(p_cam.z());
     }
 
@@ -339,11 +338,11 @@ void VIOManager::retrieveFromVisualSparseMap(
             const int gx = static_cast<int>(pc.x()) / grid_size_;
             const int gy = static_cast<int>(pc.y()) / grid_size_;
             if (gx < 0 || gy < 0 || gx >= grid_n_width_ || gy >= grid_n_height_) continue;
-            const size_t idx = static_cast<size_t>(gy) * static_cast<size_t>(grid_n_width_) +
-                               static_cast<size_t>(gx);
+            const size_t idx = static_cast<size_t>(gy) * static_cast<size_t>(grid_n_width_)
+                + static_cast<size_t>(gx);
             const float dist = static_cast<float>((cam_pos_w - vp->pos_).norm());
             if (dist <= grid_map_dist_[idx]) {
-                grid_map_dist_[idx] = dist;
+                grid_map_dist_[idx]   = dist;
                 grid_best_point_[idx] = vp;
             }
         }
@@ -351,7 +350,7 @@ void VIOManager::retrieveFromVisualSparseMap(
 
     // 无当前 scan 体素命中时回退：全图投影（首帧建图后扩展期）
     if (std::none_of(grid_best_point_.begin(), grid_best_point_.end(),
-                     [](VisualPoint* p) { return p != nullptr; })) {
+            [](VisualPoint* p) { return p != nullptr; })) {
         for (auto& [loc, bucket] : feat_map_) {
             for (auto& vp_up : bucket.points) {
                 VisualPoint* vp = vp_up.get();
@@ -364,11 +363,11 @@ void VIOManager::retrieveFromVisualSparseMap(
                 const int gx = static_cast<int>(pc.x()) / grid_size_;
                 const int gy = static_cast<int>(pc.y()) / grid_size_;
                 if (gx < 0 || gy < 0 || gx >= grid_n_width_ || gy >= grid_n_height_) continue;
-                const size_t idx = static_cast<size_t>(gy) * static_cast<size_t>(grid_n_width_) +
-                                   static_cast<size_t>(gx);
+                const size_t idx = static_cast<size_t>(gy) * static_cast<size_t>(grid_n_width_)
+                    + static_cast<size_t>(gx);
                 const float dist = static_cast<float>((cam_pos_w - vp->pos_).norm());
                 if (dist <= grid_map_dist_[idx]) {
-                    grid_map_dist_[idx] = dist;
+                    grid_map_dist_[idx]   = dist;
                     grid_best_point_[idx] = vp;
                 }
             }
@@ -380,8 +379,7 @@ void VIOManager::retrieveFromVisualSparseMap(
         VisualPoint* vp = grid_best_point_[idx];
         if (vp == nullptr) continue;
 
-        Feature* ref = vp->ref_patch_ ? vp->ref_patch_
-                                      : vp->getCloseViewObs(cam_pos_w);
+        Feature* ref = vp->ref_patch_ ? vp->ref_patch_ : vp->getCloseViewObs(cam_pos_w);
         if (ref == nullptr || ref->img_.empty()) continue;
 
         const M3D R_cur_ref = Rcw_ * ref->T_f_w_rot_.transpose();
@@ -392,33 +390,35 @@ void VIOManager::retrieveFromVisualSparseMap(
         if (depth_ref < 1e-3) continue;
 
         if (normal_en_ && vp->is_normal_initialized_) {
-            const V3D xyz_ref = ref->T_f_w_rot_ * vp->pos_ + ref->T_f_w_pos_;
+            const V3D xyz_ref    = ref->T_f_w_rot_ * vp->pos_ + ref->T_f_w_pos_;
             const V3D normal_ref = ref->T_f_w_rot_ * vp->normal_;
-            getWarpMatrixAffineHomography(ref->px_, xyz_ref, normal_ref,
-                                           R_cur_ref, t_cur_ref, ref->level_, A_cur_ref);
+            getWarpMatrixAffineHomography(
+                ref->px_, xyz_ref, normal_ref, R_cur_ref, t_cur_ref, ref->level_, A_cur_ref);
         } else {
-            getWarpMatrixAffine(*this, ref->px_, ref->f_, depth_ref,
-                                R_cur_ref, t_cur_ref, ref->level_, 0, patch_size_half_, A_cur_ref);
+            getWarpMatrixAffine(*this, ref->px_, ref->f_, depth_ref, R_cur_ref, t_cur_ref,
+                ref->level_, 0, patch_size_half_, A_cur_ref);
         }
 
         if (!A_cur_ref.allFinite() || std::abs(A_cur_ref.determinant()) < 1e-8) continue;
 
-        const int search_level = getBestSearchLevel(A_cur_ref, patch_pyramid_level_ - 1);
+        const int search_level         = getBestSearchLevel(A_cur_ref, patch_pyramid_level_ - 1);
         const Eigen::Vector2d px_local = ref->px_ - ref->patch_origin_.cast<double>();
         std::vector<float> warp_patch(
-            static_cast<size_t>(patch_size_total_) * static_cast<size_t>(patch_pyramid_level_), 0.0f);
+            static_cast<size_t>(patch_size_total_) * static_cast<size_t>(patch_pyramid_level_),
+            0.0f);
         for (int lvl = 0; lvl < patch_pyramid_level_; ++lvl) {
-            warpAffine(A_cur_ref, ref->img_, px_local, ref->level_,
-                       search_level, lvl, patch_size_half_, warp_patch.data());
+            warpAffine(A_cur_ref, ref->img_, px_local, ref->level_, search_level, lvl,
+                patch_size_half_, warp_patch.data());
         }
 
-        const V3D p_cam = Rcw_ * vp->pos_ + Pcw_;
+        const V3D p_cam          = Rcw_ * vp->pos_ + Pcw_;
         const Eigen::Vector2d pc = world2cam(p_cam);
-        const int scale_s = 1 << search_level;
+        const int scale_s        = 1 << search_level;
         if (!isInFrame(pc, patch_size_half_ * scale_s + 2)) continue;
 
         std::vector<float> cur_patch(
-            static_cast<size_t>(patch_size_total_) * static_cast<size_t>(patch_pyramid_level_), 0.0f);
+            static_cast<size_t>(patch_size_total_) * static_cast<size_t>(patch_pyramid_level_),
+            0.0f);
         getImagePatch(img, pc, cur_patch.data(), search_level);
 
         const float* w0 = &warp_patch[static_cast<size_t>(patch_size_total_) * search_level];
@@ -453,30 +453,30 @@ void VIOManager::updateState(const cv::Mat& img, int level) {
     Eigen::MatrixXd H_sub(H_DIM, 6);
 
     StatesGroup old_state = *state_;
-    float last_error = std::numeric_limits<float>::max();
-    bool ekf_end = false;
+    float last_error      = std::numeric_limits<float>::max();
+    bool ekf_end          = false;
 
     for (int iteration = 0; iteration < max_iterations_ && !ekf_end; ++iteration) {
         z.setZero();
         H_sub.setZero();
 
-        const M3D Rwi = state_->rot_end;
-        const V3D Pwi = state_->pos_end;
-        Rcw_ = Rci_ * Rwi.transpose();
-        Pcw_ = -Rci_ * Rwi.transpose() * Pwi + Pci_;
+        const M3D Rwi    = state_->rot_end;
+        const V3D Pwi    = state_->pos_end;
+        Rcw_             = Rci_ * Rwi.transpose();
+        Pcw_             = -Rci_ * Rwi.transpose() * Pwi + Pci_;
         const M3D Jdp_dt = Rci_ * Rwi.transpose();
 
         float error_sum = 0.0f;
-        int n_meas = 0;
+        int n_meas      = 0;
 
         for (int i = 0; i < total_points_; ++i) {
-            const int search_level = visual_submap_.search_levels[i];
+            const int search_level  = visual_submap_.search_levels[i];
             const int pyramid_level = level + search_level;
-            const int scale = 1 << pyramid_level;
-            const int margin = patch_size_half_ * scale + scale + 1;
+            const int scale         = 1 << pyramid_level;
+            const int margin        = patch_size_half_ * scale + scale + 1;
 
             VisualPoint* vp = visual_submap_.voxel_points[i];
-            const V3D pf = Rcw_ * vp->pos_ + Pcw_;
+            const V3D pf    = Rcw_ * vp->pos_ + Pcw_;
 
             Eigen::Matrix<double, 2, 3> Jdpi;
             if (!computeProjectionJacobian(pf, Jdpi)) continue;
@@ -485,14 +485,14 @@ void VIOManager::updateState(const cv::Mat& img, int level) {
 
             const M3D p_hat = skewSym(pf);
 
-            const int u_ref_i = static_cast<int>(std::floor(pc.x() / scale)) * scale;
-            const int v_ref_i = static_cast<int>(std::floor(pc.y() / scale)) * scale;
+            const int u_ref_i    = static_cast<int>(std::floor(pc.x() / scale)) * scale;
+            const int v_ref_i    = static_cast<int>(std::floor(pc.y() / scale)) * scale;
             const float subpix_u = static_cast<float>(pc.x() - u_ref_i) / static_cast<float>(scale);
             const float subpix_v = static_cast<float>(pc.y() - v_ref_i) / static_cast<float>(scale);
-            const float w_tl = (1.0f - subpix_u) * (1.0f - subpix_v);
-            const float w_tr = subpix_u * (1.0f - subpix_v);
-            const float w_bl = (1.0f - subpix_u) * subpix_v;
-            const float w_br = subpix_u * subpix_v;
+            const float w_tl     = (1.0f - subpix_u) * (1.0f - subpix_v);
+            const float w_tr     = subpix_u * (1.0f - subpix_v);
+            const float w_bl     = (1.0f - subpix_u) * subpix_v;
+            const float w_br     = subpix_u * subpix_v;
 
             const std::vector<float>& P = visual_submap_.warp_patch[i];
 
@@ -504,16 +504,19 @@ void VIOManager::updateState(const cv::Mat& img, int level) {
                     const int col_x = u_ref_i - patch_size_half_ * scale + y * scale;
                     if (col_x < scale || col_x + 2 * scale >= img.cols) continue;
 
-                    const float du = 0.5f * (
-                        (w_tl * row[scale] + w_tr * row[2 * scale]
-                       + w_bl * row[scale * img.cols + scale] + w_br * row[scale * img.cols + 2 * scale])
-                      - (w_tl * row[-scale] + w_tr * row[0]
-                       + w_bl * row[scale * img.cols - scale] + w_br * row[scale * img.cols]));
-                    const float dv = 0.5f * (
-                        (w_tl * row[scale * img.cols] + w_tr * row[scale + scale * img.cols]
-                       + w_bl * row[2 * scale * img.cols] + w_br * row[2 * scale * img.cols + scale])
-                      - (w_tl * row[-scale * img.cols] + w_tr * row[-scale * img.cols + scale]
-                       + w_bl * row[0] + w_br * row[scale]));
+                    const float du = 0.5f
+                        * ((w_tl * row[scale] + w_tr * row[2 * scale]
+                               + w_bl * row[scale * img.cols + scale]
+                               + w_br * row[scale * img.cols + 2 * scale])
+                            - (w_tl * row[-scale] + w_tr * row[0]
+                                + w_bl * row[scale * img.cols - scale]
+                                + w_br * row[scale * img.cols]));
+                    const float dv = 0.5f
+                        * ((w_tl * row[scale * img.cols] + w_tr * row[scale + scale * img.cols]
+                               + w_bl * row[2 * scale * img.cols]
+                               + w_br * row[2 * scale * img.cols + scale])
+                            - (w_tl * row[-scale * img.cols] + w_tr * row[-scale * img.cols + scale]
+                                + w_bl * row[0] + w_br * row[scale]));
 
                     Eigen::Vector2d Jimg(du, dv);
                     Jimg /= static_cast<double>(scale);
@@ -524,14 +527,13 @@ void VIOManager::updateState(const cv::Mat& img, int level) {
                     const Eigen::Matrix<double, 1, 3> Jdt   = Jdp * Jdp_dt;
 
                     const double cur_value = w_tl * row[0] + w_tr * row[scale]
-                                            + w_bl * row[scale * img.cols]
-                                            + w_br * row[scale * img.cols + scale];
+                        + w_bl * row[scale * img.cols] + w_br * row[scale * img.cols + scale];
                     const double res = cur_value
                         - static_cast<double>(P[static_cast<size_t>(patch_size_total_) * level
-                                                + static_cast<size_t>(x) * patch_size_ + y]);
+                            + static_cast<size_t>(x) * patch_size_ + y]);
 
-                    const int row_idx = i * patch_size_total_ + x * patch_size_ + y;
-                    z(row_idx) = res;
+                    const int row_idx             = i * patch_size_total_ + x * patch_size_ + y;
+                    z(row_idx)                    = res;
                     H_sub.block<1, 3>(row_idx, 0) = JdR;
                     H_sub.block<1, 3>(row_idx, 3) = Jdt;
                     error_sum += static_cast<float>(res * res);
@@ -552,10 +554,10 @@ void VIOManager::updateState(const cv::Mat& img, int level) {
             break;
         }
 
-        old_state = *state_;
+        old_state  = *state_;
         last_error = error;
 
-        const Eigen::MatrixXd H_sub_T = H_sub.transpose();
+        const Eigen::MatrixXd H_sub_T     = H_sub.transpose();
         Eigen::Matrix<double, 6, 6> H_T_H = H_sub_T * H_sub;
         Eigen::Matrix<double, DIM_STATE, DIM_STATE> K_1 =
             Eigen::Matrix<double, DIM_STATE, DIM_STATE>::Zero();
@@ -563,18 +565,18 @@ void VIOManager::updateState(const cv::Mat& img, int level) {
             (H_T_H + (state_->cov.block<6, 6>(0, 0) / img_point_cov_).inverse()).inverse();
 
         const Eigen::VectorXd HTz = H_sub_T * z;
-        const VD<DIM_STATE> vec = (*state_propagat_) - (*state_);
+        const VD<DIM_STATE> vec   = (*state_propagat_) - (*state_);
 
         Eigen::Matrix<double, DIM_STATE, DIM_STATE> G =
             Eigen::Matrix<double, DIM_STATE, DIM_STATE>::Zero();
         G.block<DIM_STATE, 6>(0, 0) = K_1.block<DIM_STATE, 6>(0, 0) * H_T_H;
 
         VD<DIM_STATE> solution = VD<DIM_STATE>::Zero();
-        solution.head<6>() = -K_1.block<6, 6>(0, 0) * HTz;
+        solution.head<6>()     = -K_1.block<6, 6>(0, 0) * HTz;
         solution += vec - G * vec;
 
         (*state_) += solution;
-        last_G_ = G;
+        last_G_       = G;
         last_G_valid_ = true;
 
         const V3D rot_add = solution.block<3, 1>(0, 0);
@@ -601,10 +603,10 @@ void VIOManager::computeJacobianAndUpdateEKF(const cv::Mat& img) {
 void VIOManager::generateVisualMapPoints(const cv::Mat& img, std::vector<pointWithVar>& pg) {
     if (pg.size() <= 10) return;
 
-    const int boundary = patch_size_half_ * (1 << (patch_pyramid_level_ - 1)) + 1;
+    const int boundary  = patch_size_half_ * (1 << (patch_pyramid_level_ - 1)) + 1;
     const size_t n_grid = static_cast<size_t>(grid_n_width_) * static_cast<size_t>(grid_n_height_);
     std::vector<float> grid_score(n_grid, 0.0f);
-    std::vector<int>   grid_pt_idx(n_grid, -1);
+    std::vector<int> grid_pt_idx(n_grid, -1);
 
     for (size_t i = 0; i < pg.size(); ++i) {
         const pointWithVar& pv = pg[i];
@@ -618,8 +620,8 @@ void VIOManager::generateVisualMapPoints(const cv::Mat& img, std::vector<pointWi
         const int gx = static_cast<int>(pc.x()) / grid_size_;
         const int gy = static_cast<int>(pc.y()) / grid_size_;
         if (gx < 0 || gy < 0 || gx >= grid_n_width_ || gy >= grid_n_height_) continue;
-        const size_t idx = static_cast<size_t>(gy) * static_cast<size_t>(grid_n_width_)
-                           + static_cast<size_t>(gx);
+        const size_t idx =
+            static_cast<size_t>(gy) * static_cast<size_t>(grid_n_width_) + static_cast<size_t>(gx);
         if (idx < grid_best_point_.size() && grid_best_point_[idx] != nullptr) continue;
 
         const int u = static_cast<int>(pc.x());
@@ -629,21 +631,23 @@ void VIOManager::generateVisualMapPoints(const cv::Mat& img, std::vector<pointWi
         for (int dy = -1; dy <= 1; ++dy) {
             for (int dx = -1; dx <= 1; ++dx) {
                 const double ix =
-                    (img.at<uint8_t>(v + dy, u + dx + 1) - img.at<uint8_t>(v + dy, u + dx - 1)) * 0.5;
+                    (img.at<uint8_t>(v + dy, u + dx + 1) - img.at<uint8_t>(v + dy, u + dx - 1))
+                    * 0.5;
                 const double iy =
-                    (img.at<uint8_t>(v + dy + 1, u + dx) - img.at<uint8_t>(v + dy - 1, u + dx)) * 0.5;
+                    (img.at<uint8_t>(v + dy + 1, u + dx) - img.at<uint8_t>(v + dy - 1, u + dx))
+                    * 0.5;
                 gxx += ix * ix;
                 gyy += iy * iy;
                 gxy += ix * iy;
             }
         }
         const double trace = gxx + gyy;
-        const double det = gxx * gyy - gxy * gxy;
-        const double disc = std::max(0.0, trace * trace / 4.0 - det);
-        const float score = static_cast<float>(trace / 2.0 - std::sqrt(disc));
+        const double det   = gxx * gyy - gxy * gxy;
+        const double disc  = std::max(0.0, trace * trace / 4.0 - det);
+        const float score  = static_cast<float>(trace / 2.0 - std::sqrt(disc));
 
         if (score > grid_score[idx]) {
-            grid_score[idx] = score;
+            grid_score[idx]  = score;
             grid_pt_idx[idx] = static_cast<int>(i);
         }
     }
@@ -658,28 +662,29 @@ void VIOManager::generateVisualMapPoints(const cv::Mat& img, std::vector<pointWi
         if (!isInFrame(pc, boundary)) continue;
         const V3D f_ref = cam2world(pc).normalized();
 
-        V3D n = pv.normal;
+        V3D n             = pv.normal;
         const V3D dir_cam = p_cam.normalized();
-        const V3D n_cam = Rcw_ * n;
+        const V3D n_cam   = Rcw_ * n;
         if (dir_cam.dot(n_cam) < 0.0) n = -n;
 
-        auto vp = std::make_unique<VisualPoint>(pv.point_w);
-        vp->normal_ = n;
-        vp->covariance_ = pv.var;
+        auto vp                    = std::make_unique<VisualPoint>(pv.point_w);
+        vp->normal_                = n;
+        vp->covariance_            = pv.var;
         vp->is_normal_initialized_ = true;
 
         std::vector<float> patch(
-            static_cast<size_t>(patch_size_total_) * static_cast<size_t>(patch_pyramid_level_), 0.0f);
+            static_cast<size_t>(patch_size_total_) * static_cast<size_t>(patch_pyramid_level_),
+            0.0f);
         for (int lvl = 0; lvl < patch_pyramid_level_; ++lvl) {
             getImagePatch(img, pc, patch.data(), lvl);
         }
         Eigen::Vector2i origin;
-        cv::Mat crop = cropAroundPixel(img, pc, origin);
-        auto feat = std::make_unique<Feature>(pc, f_ref, std::move(crop), Rcw_, Pcw_, 0);
+        cv::Mat crop        = cropAroundPixel(img, pc, origin);
+        auto feat           = std::make_unique<Feature>(pc, f_ref, std::move(crop), Rcw_, Pcw_, 0);
         feat->patch_origin_ = origin;
-        feat->patch_ = std::move(patch);
-        feat->score_ = grid_score[idx];
-        vp->ref_patch_ = feat.get();
+        feat->patch_        = std::move(patch);
+        feat->score_        = grid_score[idx];
+        vp->ref_patch_      = feat.get();
         vp->obs_.push_back(std::move(feat));
 
         const VOXEL_LOCATION key = worldToVisualVoxel(pv.point_w);
@@ -700,27 +705,29 @@ void VIOManager::updateVisualMapPoints(const cv::Mat& img) {
         // 视角变化足够大才新增观测，避免冗余
         bool need_new_obs = true;
         if (vp->ref_patch_ != nullptr) {
-            const V3D ref_cam_pos = -vp->ref_patch_->T_f_w_rot_.transpose() * vp->ref_patch_->T_f_w_pos_;
+            const V3D ref_cam_pos =
+                -vp->ref_patch_->T_f_w_rot_.transpose() * vp->ref_patch_->T_f_w_pos_;
             const double baseline = (cam_pos_w - ref_cam_pos).norm();
-            const double depth = (Rcw_ * vp->pos_ + Pcw_).z();
-            need_new_obs = (baseline / std::max(depth, 1e-3)) > 0.1;  // 视差比阈值
+            const double depth    = (Rcw_ * vp->pos_ + Pcw_).z();
+            need_new_obs          = (baseline / std::max(depth, 1e-3)) > 0.1; // 视差比阈值
         }
         if (!need_new_obs) continue;
 
-        const V3D p_cam = Rcw_ * vp->pos_ + Pcw_;
+        const V3D p_cam          = Rcw_ * vp->pos_ + Pcw_;
         const Eigen::Vector2d pc = world2cam(p_cam);
-        const V3D f_ref = cam2world(pc).normalized();
+        const V3D f_ref          = cam2world(pc).normalized();
 
-        std::vector<float> patch(static_cast<size_t>(patch_size_total_) * patch_pyramid_level_, 0.0f);
+        std::vector<float> patch(
+            static_cast<size_t>(patch_size_total_) * patch_pyramid_level_, 0.0f);
         for (int lvl = 0; lvl < patch_pyramid_level_; ++lvl) {
             getImagePatch(img, pc, patch.data(), lvl);
         }
         Eigen::Vector2i origin;
-        cv::Mat crop = cropAroundPixel(img, pc, origin);
-        auto feat = std::make_unique<Feature>(pc, f_ref, std::move(crop), Rcw_, Pcw_, 0);
+        cv::Mat crop        = cropAroundPixel(img, pc, origin);
+        auto feat           = std::make_unique<Feature>(pc, f_ref, std::move(crop), Rcw_, Pcw_, 0);
         feat->patch_origin_ = origin;
-        feat->patch_ = std::move(patch);
-        feat->score_ = vp->ref_patch_ ? vp->ref_patch_->score_ : 0.0f;
+        feat->patch_        = std::move(patch);
+        feat->score_        = vp->ref_patch_ ? vp->ref_patch_->score_ : 0.0f;
 
         vp->obs_.push_back(std::move(feat));
         if (vp->obs_.size() > 10) {
@@ -756,14 +763,12 @@ void VIOManager::updateReferencePatch(
 // processFrame — VIOManager 主入口
 // 原始来源: FAST-LIVO2/src/vio.cpp VIOManager::processFrame
 // ══════════════════════════════════════════════════════════════════
-void VIOManager::processFrame(const cv::Mat& img,
-                               std::vector<pointWithVar>& pg,
-                               const std::unordered_map<VOXEL_LOCATION,
-                                   std::unique_ptr<VoxelOctoTree>>& plane_map) {
+void VIOManager::processFrame(const cv::Mat& img, std::vector<pointWithVar>& pg,
+    const std::unordered_map<VOXEL_LOCATION, std::unique_ptr<VoxelOctoTree>>& plane_map) {
     const M3D Rwi = state_->rot_end;
     const V3D Pwi = state_->pos_end;
-    Rcw_ = Rci_ * Rwi.transpose();
-    Pcw_ = -Rci_ * Rwi.transpose() * Pwi + Pci_;
+    Rcw_          = Rci_ * Rwi.transpose();
+    Pcw_          = -Rci_ * Rwi.transpose() * Pwi + Pci_;
 
     retrieveFromVisualSparseMap(img, pg, plane_map);
     computeJacobianAndUpdateEKF(img);
@@ -776,12 +781,12 @@ void VIOManager::processFrame(const cv::Mat& img,
     // 一个恒定的位姿偏移。
     const M3D Rwi_updated = state_->rot_end;
     const V3D Pwi_updated = state_->pos_end;
-    Rcw_ = Rci_ * Rwi_updated.transpose();
-    Pcw_ = -Rci_ * Rwi_updated.transpose() * Pwi_updated + Pci_;
+    Rcw_                  = Rci_ * Rwi_updated.transpose();
+    Pcw_                  = -Rci_ * Rwi_updated.transpose() * Pwi_updated + Pci_;
 
     generateVisualMapPoints(img, pg);
     updateVisualMapPoints(img);
     updateReferencePatch(plane_map);
 }
 
-}  // namespace radar::fast_livo2
+} // namespace radar::fast_livo2
