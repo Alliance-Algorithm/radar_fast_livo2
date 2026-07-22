@@ -24,9 +24,15 @@ ShmCamera::~ShmCamera() = default;  // reader_ RAII closes on destruction
 // open
 // ══════════════════════════════════════════════════════════════════
 
-auto ShmCamera::open() -> std::expected<void, std::string> {
+auto ShmCamera::open() -> std::expected<void, ShmCameraError> {
+    if (target_width_ <= 0 || target_height_ <= 0) {
+        return std::unexpected{ShmCameraError{
+            hikcamera::FrameReadErrorCode::InvalidFrame,
+            "ShmCamera: target dimensions must be positive"}};
+    }
     auto result = reader_.open(shm_name_.c_str());
-    if (!result) return std::unexpected(result.error());
+    if (!result) return std::unexpected{ShmCameraError{
+        hikcamera::FrameReadErrorCode::InvalidFrame, result.error()}};
     is_open_ = true;
     return {};
 }
@@ -38,16 +44,20 @@ auto ShmCamera::is_open() const noexcept -> bool { return is_open_; }
 // ══════════════════════════════════════════════════════════════════
 
 auto ShmCamera::wait_next(std::chrono::milliseconds timeout)
-    -> std::expected<CameraFrame, std::string> {
+    -> std::expected<CameraFrame, ShmCameraError> {
     auto sf_result = reader_.wait_next(timeout);
-    if (!sf_result) return std::unexpected(sf_result.error());
+    if (!sf_result) {
+        const auto& e = sf_result.error();
+        return std::unexpected{ShmCameraError{e.code, e.message}};
+    }
 
     const auto& sf = *sf_result;
     CameraFrame frame = convert(sf.mat(), target_width_, target_height_,
                                 sf.metadata(), img_time_offset_);
     if (frame.gray.empty()) {
-        return std::unexpected(
-            "ShmCamera: conversion produced empty frame (invalid SHM source)");
+        return std::unexpected{ShmCameraError{
+            hikcamera::FrameReadErrorCode::InvalidFrame,
+            "ShmCamera: conversion produced empty frame (invalid SHM source)"}};
     }
     return frame;
 }
@@ -82,7 +92,7 @@ auto ShmCamera::convert(const cv::Mat& bgr, int target_width,
     } else {
         cv::Mat resized;
         cv::resize(gray, resized, cv::Size(target_width, target_height),
-                   0.0, 0.0, cv::INTER_AREA);
+                    0.0, 0.0, cv::INTER_AREA);
         frame.gray = std::move(resized);
     }
 
