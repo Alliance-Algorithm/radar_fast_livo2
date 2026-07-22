@@ -4,7 +4,11 @@
 // 订阅:
 //   /odin1/cloud_raw  (sensor_msgs::msg::PointCloud2)  - Odin1 原始点云
 //   /odin1/imu        (sensor_msgs::msg::Imu)           - 400Hz IMU
-//   /camera/image_raw (sensor_msgs::msg::Image)         - HIK 相机图像 (仅 LIVO 模式)
+//
+// 相机输入（仅 LIVO 模式）:
+//   不订阅 ROS Image topic；通过 hikcamera::SharedFrameReader 从 POSIX
+//   共享内存直接读取 HIK 相机帧（BGR8 → gray CV_8UC1 @ 目标分辨率）。
+//   相机线程在 img_en_=true 时启动，持续等待 SHM 新帧并写入内部队列。
 //
 // 发布:
 //   /fast_livo2/odom        (nav_msgs::msg::Odometry)
@@ -18,7 +22,7 @@
 //   4. 首帧: VoxelMapManager::BuildVoxelMap() 初始化哈希体素地图
 //   5. 非首帧: VoxelMapManager::StateEstimation() ESIKF 迭代匹配
 //   6. VoxelMapManager::UpdateVoxelMap() 增量更新地图
-//   7. 发布 odom / cloud_world / path / TF
+//   7. (LIVO) VIO 光度更新 + 发布 odom / cloud_world / path / TF
 
 #include "radar_fast_livo2/common_lib.hpp"
 #include "radar_fast_livo2/imu_processing.hpp"
@@ -26,10 +30,11 @@
 #include "radar_fast_livo2/esikf_state.hpp"
 #include "radar_fast_livo2/voxel_map.hpp"
 #include "radar_fast_livo2/vio.hpp"
+#include "radar_fast_livo2/shm_camera.hpp"
+#include "radar_fast_livo2/camera_frame_queue.hpp"
 
 #include <rclcpp/rclcpp.hpp>
 #include <sensor_msgs/msg/imu.hpp>
-#include <sensor_msgs/msg/image.hpp>
 #include <sensor_msgs/msg/point_cloud2.hpp>
 #include <nav_msgs/msg/odometry.hpp>
 #include <nav_msgs/msg/path.hpp>
@@ -38,19 +43,19 @@
 #include <tf2_ros/transform_broadcaster.h>
 #include <pcl_conversions/pcl_conversions.h>
 #include <pcl/io/pcd_io.h>
-#include <cv_bridge/cv_bridge.hpp>
 #include <unordered_map>
 #include <cmath>
 
 #include "radar_fast_livo2/voxel_map.hpp"
 
 #include <array>
+#include <chrono>
 #include <deque>
 #include <limits>
 #include <mutex>
 #include <string>
+#include <thread>
 #include <filesystem>
-#include <chrono>
 
 namespace radar::fast_livo2 {
 
@@ -62,6 +67,7 @@ public:
         load_parameters();
         init_subscribers();
         init_publishers();
+        start_camera();  // 仅在 LIVO 模式启动 SHM 相机线程
         // HACK: 手动 SLAM 保存触发用轮询文件（约定同 Odin1 厂商驱动的
         // "echo 'set save_map 1' > /tmp/odin_command.txt"），而非 ROS2
         // Service/信号处理器——PCL 的 savePCDFileBinary 内部有动态内存
@@ -77,6 +83,7 @@ public:
     }
 
     ~LivMapperNode() override {
+        stop_camera();  // 先停相机线程
         save_pcd();
     }
 
@@ -86,7 +93,9 @@ private:
         // Topics
         declare_parameter("lidar_topic",  "/odin1/cloud_raw");
         declare_parameter("imu_topic",    "/odin1/imu");
-        declare_parameter("img_topic",    "/camera/image_raw");
+
+        // Camera SHM（替换原 img_topic）
+        declare_parameter("camera/shm_name", std::string("/hikcamera_shm"));
 
         // Sensor config
         declare_parameter("lidar_type",          static_cast<int>(LidarType::ODIN1));
@@ -140,10 +149,10 @@ private:
         // Camera intrinsics (pinhole)
         declare_parameter("cam_fx", 500.0);
         declare_parameter("cam_fy", 500.0);
-        declare_parameter("cam_cx", 640.0);
-        declare_parameter("cam_cy", 360.0);
-        declare_parameter("cam_width",  1280);
-        declare_parameter("cam_height", 720);
+        declare_parameter("cam_cx", 1368.0);
+        declare_parameter("cam_cy", 912.0);
+        declare_parameter("cam_width",  2736);
+        declare_parameter("cam_height", 1824);
         declare_parameter("img_scale",  0.5);
 
         // VIO
@@ -193,7 +202,6 @@ private:
     void load_parameters() {
         lidar_topic_ = get_parameter("lidar_topic").as_string();
         imu_topic_   = get_parameter("imu_topic").as_string();
-        img_topic_   = get_parameter("img_topic").as_string();
         slam_mode_   = get_parameter("slam_mode").as_int();
         img_en_      = get_parameter("img_en").as_bool() && (slam_mode_ == SlamMode::LIVO);
 
@@ -236,6 +244,24 @@ private:
         imu_time_offset_ = get_parameter("imu_time_offset").as_double();
         img_scale_       = get_parameter("img_scale").as_double();
 
+        // ── ShmCamera 初始化（仅 LIVO 模式）──
+        if (img_en_) {
+            const std::string shm_name = get_parameter("camera/shm_name").as_string();
+            const int cam_width  = get_parameter("cam_width").as_int();
+            const int cam_height = get_parameter("cam_height").as_int();
+
+            if (cam_width <= 0 || cam_height <= 0) {
+                throw std::runtime_error("LIVO: invalid camera size (cam_width/height)");
+            }
+
+            camera_ = std::make_unique<ShmCamera>(
+                shm_name, cam_width, cam_height, img_time_offset_);
+
+            RCLCPP_INFO(get_logger(),
+                "Camera SHM: '%s' → %dx%d gray, offset=%.3fs",
+                shm_name.c_str(), cam_width, cam_height, img_time_offset_);
+        }
+
         // ── VIOManager 初始化（仅 LIVO 模式）──
         if (img_en_) {
             auto pcl_ = get_parameter("Pcl").as_double_array();
@@ -256,17 +282,38 @@ private:
             const double cam_fy = get_parameter("cam_fy").as_double();
             const double cam_cx = get_parameter("cam_cx").as_double();
             const double cam_cy = get_parameter("cam_cy").as_double();
-            const int    cam_width  = get_parameter("cam_width").as_int();
-            const int    cam_height = get_parameter("cam_height").as_int();
+            // cam_width/cam_height already loaded above
+            const int cam_width  = get_parameter("cam_width").as_int();
+            const int cam_height = get_parameter("cam_height").as_int();
             const int    patch_size = get_parameter("patch_size").as_int();
             const int    patch_pyramid_level = get_parameter("patch_pyramid_level").as_int();
 
+            // 上游 setImuToLidarExtrinsic(extT, extR): Rli=R^T, Pli=-R^T*t
+            // yaml extrinsic 与 LIO 相同: p_imu = R_il * p_lidar + t_il
+            const M3D Rli = r_li.transpose();
+            const V3D Pli = -r_li.transpose() * t_li;
+
+            const bool identity_cam =
+                rcl.isIdentity(1e-6) && pcl.norm() < 1e-6;
+            if (identity_cam) {
+                RCLCPP_WARN(get_logger(),
+                    "LIVO: Rcl/Pcl still identity/zero — fill real LiDAR-Camera "
+                    "extrinsics before trusting visual updates");
+            }
+            if (cam_width <= 0 || cam_height <= 0 || cam_fx <= 1.0 || cam_fy <= 1.0) {
+                throw std::runtime_error(
+                    "LIVO: invalid camera intrinsics/size (cam_fx/fy/width/height)");
+            }
+
             vio_manager_.init(cam_fx, cam_fy, cam_cx, cam_cy, cam_width, cam_height,
-                               rcl, pcl, r_li, t_li,
+                               rcl, pcl, Rli, Pli,
                                patch_size, patch_pyramid_level, /*grid_size=*/20,
                                /*normal_en=*/true, /*ncc_en=*/true,
                                /*img_point_cov=*/100.0, /*ncc_thre=*/0.6,
                                /*max_iterations=*/5);
+            RCLCPP_INFO(get_logger(),
+                "VIO extrinsics: Rli=R_il^T applied; cam %dx%d fx=%.1f fy=%.1f",
+                cam_width, cam_height, cam_fx, cam_fy);
         }
 
         // 降采样参数
@@ -319,8 +366,53 @@ private:
         RCLCPP_INFO(get_logger(), "VoxelMap: max_layer=%d, voxel_size=%.3f, max_iter=%d, plane_thresh=%.4f",
                     voxel_config_.max_layer_, voxel_config_.max_voxel_size_,
                     voxel_config_.max_iterations_, voxel_config_.planner_threshold_);
-        if (img_en_) {
-            RCLCPP_INFO(get_logger(), "Image topic: %s (scale=%.2f)", img_topic_.c_str(), img_scale_);
+    }
+
+    // ── 相机线程管理 ─────────────────────────────────────────────
+
+    /// 仅在 img_en_ 为 true 时打开 SHM 并启动采集线程。
+    /// 打开失败直接抛异常退出节点构造。
+    void start_camera() {
+        if (!img_en_ || !camera_) return;
+
+        auto open_result = camera_->open();
+        if (!open_result) {
+            throw std::runtime_error(
+                "LIVO: failed to open camera SHM: " + open_result.error());
+        }
+        RCLCPP_INFO(get_logger(), "Camera SHM opened, starting capture thread");
+
+        camera_running_.store(true);
+        camera_thread_ = std::thread([this]() { camera_loop(); });
+    }
+
+    /// Set running=false, then join the camera thread unconditionally.
+    /// wait_next uses 200ms timeout, so join is bounded by that + conversion.
+    /// Also joins if the thread already exited itself (running flag already false).
+    void stop_camera() {
+        camera_running_.store(false);
+        if (camera_thread_.joinable()) {
+            camera_thread_.join();
+        }
+    }
+
+    /// 相机采集循环：阻塞等待新 SHM 帧，转灰度 → 入队
+    void camera_loop() {
+        while (camera_running_.load()) {
+            auto result = camera_->wait_next(std::chrono::milliseconds(200));
+            if (!result) {
+                const auto& err = result.error();
+                if (err.find("timeout") != std::string::npos
+                    || err.find("Timeout") != std::string::npos) {
+                    continue;  // timeout: normal, retry
+                }
+                // Fatal reader error: log once, terminate worker
+                RCLCPP_ERROR(get_logger(), "Camera SHM fatal read error: %s", err.c_str());
+                camera_running_.store(false);
+                break;
+            }
+
+            std::ignore = camera_queue_.push(std::move(*result));
         }
     }
 
@@ -339,14 +431,6 @@ private:
             [this](const sensor_msgs::msg::Imu::SharedPtr msg) {
                 on_imu(msg);
             });
-
-        if (img_en_) {
-            sub_img_ = create_subscription<sensor_msgs::msg::Image>(
-                img_topic_, qos,
-                [this](const sensor_msgs::msg::Image::SharedPtr msg) {
-                    on_image(msg);
-                });
-        }
     }
 
     void init_publishers() {
@@ -409,28 +493,12 @@ private:
         process_frame();
     }
 
-    void on_image(const sensor_msgs::msg::Image::SharedPtr msg) {
-        std::lock_guard<std::mutex> lock(img_buf_mutex_);
-        img_buf_.push_back(msg);
-        if (img_buf_.size() > 5) img_buf_.pop_front();
-    }
-
-    // 从 img_buf_ 中取出时间上离 target_time 最近的一帧，转换为灰度图。
-    // 找不到足够接近的帧（超过 0.05s）时返回 false，跳过本帧 VIO。
+    // 从相机队列中选时间最接近的一帧并消费之。
+    // 超过 50ms 容忍范围时返回 false，跳过本帧 VIO。
     bool get_nearest_image(double target_time, cv::Mat& out_gray) {
-        sensor_msgs::msg::Image::SharedPtr best;
-        double best_dt = std::numeric_limits<double>::max();
-        {
-            std::lock_guard<std::mutex> lock(img_buf_mutex_);
-            for (const auto& img_msg : img_buf_) {
-                double t = rclcpp::Time(img_msg->header.stamp).seconds() + img_time_offset_;
-                double dt = std::abs(t - target_time);
-                if (dt < best_dt) { best_dt = dt; best = img_msg; }
-            }
-        }
-        if (!best || best_dt > 0.05) return false;
-        auto cv_ptr = cv_bridge::toCvCopy(best, "mono8");
-        out_gray = cv_ptr->image;
+        auto result = camera_queue_.take_nearest(target_time, 0.05);
+        if (!result) return false;
+        out_gray = std::move(result->gray);
         return true;
     }
 
@@ -446,11 +514,11 @@ private:
     //   4. 首帧: BuildVoxelMap() 初始化哈希体素地图
     //   5. 非首帧: StateEstimation() ESIKF 迭代匹配 + 协方差更新
     //   6. UpdateVoxelMap() 增量更新体素地图
-    //   7. 发布 odom / cloud_world / path / TF
-    //   8. PCD 累积（可选）
+    //   7. (LIVO) VIO 光度更新
+    //   8. 发布 odom / cloud_world / path / TF
+    //   9. PCD 累积（可选）
     //
     // 简化（相对原版）:
-    //   - 跳过 VIO/img 路径（ONLY_LIO 模式）
     //   - 跳过曝光时间估计 (inv_expo_time)
     //   - 跳过平面可视化发布 (pubVoxelMap)
     //   - 跳过 pose_output txt 日志
@@ -831,7 +899,7 @@ private:
     }
 
     // ── 成员变量 ─────────────────────────────────────────────────
-    std::string lidar_topic_, imu_topic_, img_topic_;
+    std::string lidar_topic_, imu_topic_;
     int    slam_mode_ = SlamMode::ONLY_LIO;
     bool   img_en_    = false;
     double img_time_offset_ = 0.0;
@@ -850,13 +918,17 @@ private:
     Preprocess  preprocess_;
     ImuProcess  imu_process_;
 
+    // ── SHM 相机（仅 LIVO 模式）──
+    std::unique_ptr<ShmCamera>    camera_;            // SharedFrameReader adapter
+    std::thread                   camera_thread_;     // 采集线程
+    std::atomic<bool>             camera_running_{false};
+    CameraFrameQueue              camera_queue_{5};   // bounded ≤5, at-most-once per sequence
+
     // 缓冲区（各自有独立互斥锁）
     std::mutex imu_buf_mutex_;
     std::mutex lidar_buf_mutex_;
-    std::mutex img_buf_mutex_;
     std::vector<ImuData, Eigen::aligned_allocator<ImuData>>  imu_buf_;
     std::deque<sensor_msgs::msg::PointCloud2::SharedPtr>    lidar_buf_;
-    std::deque<sensor_msgs::msg::Image::SharedPtr>          img_buf_;
 
     // 体素地图管理器（替换原来的 ikd-Tree）
     VoxelMapManager  voxel_map_;
@@ -870,7 +942,6 @@ private:
     // 发布者 & TF
     rclcpp::Subscription<sensor_msgs::msg::PointCloud2>::SharedPtr sub_lidar_;
     rclcpp::Subscription<sensor_msgs::msg::Imu>::SharedPtr         sub_imu_;
-    rclcpp::Subscription<sensor_msgs::msg::Image>::SharedPtr       sub_img_;
     rclcpp::Publisher<nav_msgs::msg::Odometry>::SharedPtr          pub_odom_;
     rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr    pub_cloud_;
     rclcpp::Publisher<nav_msgs::msg::Path>::SharedPtr              pub_path_;

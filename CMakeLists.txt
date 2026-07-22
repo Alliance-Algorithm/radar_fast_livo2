@@ -33,6 +33,7 @@ find_package(PCL REQUIRED COMPONENTS common io filters search kdtree)
 find_package(Eigen3 REQUIRED)
 find_package(OpenCV REQUIRED)
 find_package(OpenMP REQUIRED)
+find_package(hikcamera REQUIRED)
 
 ament_auto_find_build_dependencies()
 
@@ -43,6 +44,8 @@ add_library(${PROJECT_NAME}_core STATIC
     src/imu_processing.cpp
     src/voxel_map.cpp
     src/vio.cpp
+    src/shm_camera.cpp
+    src/camera_frame_queue.cpp
 )
 ament_target_dependencies(${PROJECT_NAME}_core
     rclcpp
@@ -56,6 +59,7 @@ target_link_libraries(${PROJECT_NAME}_core
     ${OpenCV_LIBS}
     Eigen3::Eigen
     OpenMP::OpenMP_CXX
+    hikcamera::hikcamera
 )
 target_include_directories(${PROJECT_NAME}_core PUBLIC
     include
@@ -69,10 +73,15 @@ ament_auto_add_executable(${PROJECT_NAME}_node
 target_link_libraries(${PROJECT_NAME}_node ${PROJECT_NAME}_core)
 
 if(BUILD_TESTING)
+    find_package(ament_cmake_gtest REQUIRED)
     find_package(ament_lint_auto REQUIRED)
     set(ament_cmake_copyright_FOUND TRUE)
     set(ament_cmake_cpplint_FOUND TRUE)
     ament_lint_auto_find_test_dependencies()
+
+    # ── ShmCamera unit tests ─────────────────────────────────────
+    ament_add_gtest(test_shm_camera test/test_shm_camera.cpp)
+    target_link_libraries(test_shm_camera ${PROJECT_NAME}_core)
 endif()
 
 install(TARGETS ${PROJECT_NAME}_node DESTINATION lib/${PROJECT_NAME})
