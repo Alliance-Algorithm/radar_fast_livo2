@@ -177,6 +177,9 @@ public:
     SubSparseMap visual_submap_;
     int total_points_ = 0;
 
+    // Depth image buffer reused across frames (allocated once, setTo(0) per frame).
+    cv::Mat depth_buf_;
+
     // 金字塔各层迭代中最后一次成功 EKF 的 G；computeJacobianAndUpdateEKF 末尾用一次
     MD<DIM_STATE, DIM_STATE> last_G_ = MD<DIM_STATE, DIM_STATE>::Zero();
     bool last_G_valid_               = false;

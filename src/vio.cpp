@@ -303,7 +303,12 @@ void VIOManager::retrieveFromVisualSparseMap(const cv::Mat& img,
     const V3D cam_pos_w = -Rcw_.transpose() * Pcw_;
 
     // 1) 当前 LiDAR 点 → depth 图 + 相关 visual voxel 键
-    cv::Mat depth_img = cv::Mat::zeros(height_, width_, CV_32FC1);
+    if (depth_buf_.rows != height_ || depth_buf_.cols != width_ || depth_buf_.type() != CV_32FC1) {
+        depth_buf_ = cv::Mat::zeros(height_, width_, CV_32FC1);
+    } else {
+        depth_buf_.setTo(0.0f);
+    }
+    cv::Mat& depth_img = depth_buf_;
     std::unordered_map<VOXEL_LOCATION, char> sub_feat_map;
     sub_feat_map.reserve(pg.size() / 4 + 16);
 
