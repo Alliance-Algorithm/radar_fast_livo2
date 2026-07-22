@@ -368,7 +368,7 @@ private:
 
         auto open_result = camera_->open();
         if (!open_result) {
-            throw std::runtime_error("LIVO: failed to open camera SHM: " + open_result.error());
+            throw std::runtime_error("LIVO: failed to open camera SHM: " + open_result.error().message);
         }
         RCLCPP_INFO(get_logger(), "Camera SHM opened, starting capture thread");
 
@@ -392,12 +392,12 @@ private:
             auto result = camera_->wait_next(std::chrono::milliseconds(200));
             if (!result) {
                 const auto& err = result.error();
-                if (err.find("timeout") != std::string::npos
-                    || err.find("Timeout") != std::string::npos) {
+                if (err.code == hikcamera::FrameReadErrorCode::Timeout) {
                     continue; // timeout: normal, retry
                 }
                 // Fatal reader error: log once, terminate worker
-                RCLCPP_ERROR(get_logger(), "Camera SHM fatal read error: %s", err.c_str());
+                RCLCPP_ERROR(get_logger(), "Camera SHM fatal read error: %s",
+                             err.message.c_str());
                 camera_running_.store(false);
                 break;
             }
@@ -694,6 +694,11 @@ private:
                 vio_manager_.state_          = &state_;
                 vio_manager_.state_propagat_ = &state_propagat;
                 vio_manager_.processFrame(gray, voxel_map_.pv_list_, voxel_map_.voxel_map_);
+            } else {
+                RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 5000,
+                    "VIO: no camera frame within 50ms of LiDAR timestamp t=%.3f "
+                    "— calibrate img_time_offset and verify clock domains",
+                    frame_end);
             }
         }
 

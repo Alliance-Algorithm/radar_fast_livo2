@@ -109,6 +109,31 @@ TEST(ShmCameraConvert, WrongTypeInputReturnsEmptyGray) {
 }
 
 // ══════════════════════════════════════════════════════════════════
+// ShmCamera::open tests — dimension validation (no SHM required)
+// ══════════════════════════════════════════════════════════════════
+
+TEST(ShmCameraOpen, RejectsZeroWidth) {
+    ShmCamera cam("/nonexistent_shm", 0, 480, 0.0);
+    auto result = cam.open();
+    EXPECT_FALSE(result.has_value());
+    EXPECT_EQ(result.error().code, hikcamera::FrameReadErrorCode::InvalidFrame);
+}
+
+TEST(ShmCameraOpen, RejectsZeroHeight) {
+    ShmCamera cam("/nonexistent_shm", 640, 0, 0.0);
+    auto result = cam.open();
+    EXPECT_FALSE(result.has_value());
+    EXPECT_EQ(result.error().code, hikcamera::FrameReadErrorCode::InvalidFrame);
+}
+
+TEST(ShmCameraOpen, RejectsNegativeDimensions) {
+    ShmCamera cam("/nonexistent_shm", -1, -1, 0.0);
+    auto result = cam.open();
+    EXPECT_FALSE(result.has_value());
+    EXPECT_EQ(result.error().code, hikcamera::FrameReadErrorCode::InvalidFrame);
+}
+
+// ══════════════════════════════════════════════════════════════════
 // CameraFrameQueue tests
 // ══════════════════════════════════════════════════════════════════
 

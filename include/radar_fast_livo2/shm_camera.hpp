@@ -34,6 +34,15 @@
 
 namespace radar::fast_livo2 {
 
+// ── ShmCameraError: typed error for ShmCamera operations ────────────
+// Wraps hikcamera::FrameReadErrorCode so consumers can branch on code
+// instead of fragile string matching.  Reader errors propagate with
+// their original code; camera-specific failures use InvalidFrame.
+struct ShmCameraError {
+    hikcamera::FrameReadErrorCode code;
+    std::string                   message;
+};
+
 // ── CameraFrame: one converted grayscale frame with metadata ──────────
 struct CameraFrame {
     cv::Mat  gray;                // owned CV_8UC1 at target resolution
@@ -65,16 +74,16 @@ public:
     ShmCamera& operator=(ShmCamera&&)      = default;
     ~ShmCamera();
 
-    /// Open the SHM ring.  Fails if the segment does not exist or is invalid.
-    [[nodiscard]] auto open() -> std::expected<void, std::string>;
+    /// Open the SHM ring.  Validates target dimensions are positive before
+    /// attempting to open; fails with InvalidFrame if width or height <= 0.
+    [[nodiscard]] auto open() -> std::expected<void, ShmCameraError>;
 
     /// Block until a new frame arrives, convert it, and return.
-    /// `timeout` uses CLOCK_MONOTONIC.  Returns error on timeout or fatal
-    /// reader failure (distinguished from timeout if SDK permits; otherwise
-    /// timeout errors are logged and caller may retry).
+    /// `timeout` uses CLOCK_MONOTONIC.  Returns ShmCameraError with the
+    /// underlying FrameReadErrorCode so callers can branch on code.
     [[nodiscard]] auto wait_next(std::chrono::milliseconds timeout
                                  = std::chrono::milliseconds{2000})
-        -> std::expected<CameraFrame, std::string>;
+        -> std::expected<CameraFrame, ShmCameraError>;
 
     [[nodiscard]] auto is_open() const noexcept -> bool;
 
