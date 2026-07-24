@@ -393,8 +393,9 @@ private:
             auto result = camera_->wait_next(std::chrono::milliseconds(200));
             if (!result) {
                 const auto& err = result.error();
-                if (err.code == hikcamera::FrameReadErrorCode::Timeout) {
-                    continue; // timeout: normal, retry
+                if (err.code == FrameReadErrorCode::Timeout
+                    || err.code == FrameReadErrorCode::ShmError) {
+                    continue;
                 }
                 // Fatal reader error: log once, terminate worker
                 RCLCPP_ERROR(get_logger(), "Camera SHM fatal read error: %s", err.message.c_str());
@@ -898,7 +899,7 @@ private:
     ImuProcess imu_process_;
 
     // ── SHM 相机（仅 LIVO 模式）──
-    std::unique_ptr<ShmCamera> camera_; // SharedFrameReader adapter
+    std::unique_ptr<ShmCamera> camera_; // hikcamera SHMRead adapter
     std::thread camera_thread_;         // 采集线程
     std::atomic<bool> camera_running_ { false };
     CameraFrameQueue camera_queue_ { 5 }; // bounded ≤5, at-most-once per sequence

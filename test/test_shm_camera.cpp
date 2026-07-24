@@ -34,7 +34,7 @@ TEST(ShmCameraConvert, ConvertsBGR8ToGrayAtTargetResolution) {
         }
     }
 
-    hikcamera::FrameMetadata meta { };
+    FrameMetadata meta { };
     meta.host_monotonic_ns  = 1'700'000'000'000ULL;
     meta.frame_id           = 42;
     meta.committed_sequence = 7;
@@ -48,7 +48,7 @@ TEST(ShmCameraConvert, ConvertsBGR8ToGrayAtTargetResolution) {
 
 TEST(ShmCameraConvert, GrayscaleValuesAreCorrect) {
     cv::Mat bgr(4, 4, CV_8UC3, cv::Scalar(0, 0, 255));
-    hikcamera::FrameMetadata meta { };
+    FrameMetadata meta { };
     meta.host_monotonic_ns  = 1'000'000'000ULL;
     meta.frame_id           = 1;
     meta.committed_sequence = 1;
@@ -65,7 +65,7 @@ TEST(ShmCameraConvert, GrayscaleValuesAreCorrect) {
 
 TEST(ShmCameraConvert, TimestampFromHostMonotonicNsPlusOffset) {
     cv::Mat bgr(2, 2, CV_8UC3, cv::Scalar(128, 128, 128));
-    hikcamera::FrameMetadata meta { };
+    FrameMetadata meta { };
     meta.host_monotonic_ns  = 1'700'000'000'000ULL;
     meta.frame_id           = 100;
     meta.committed_sequence = 42;
@@ -78,7 +78,7 @@ TEST(ShmCameraConvert, TimestampFromHostMonotonicNsPlusOffset) {
 
 TEST(ShmCameraConvert, MetadataPreserved) {
     cv::Mat bgr(10, 10, CV_8UC3, cv::Scalar(0, 128, 255));
-    hikcamera::FrameMetadata meta { };
+    FrameMetadata meta { };
     meta.host_monotonic_ns  = 9'876'543'210'000'000ULL;
     meta.frame_id           = 999;
     meta.committed_sequence = 12345;
@@ -96,14 +96,14 @@ TEST(ShmCameraConvert, MetadataPreserved) {
 
 TEST(ShmCameraConvert, EmptyInputReturnsEmptyGray) {
     cv::Mat tiny(0, 0, CV_8UC3);
-    hikcamera::FrameMetadata meta { };
+    FrameMetadata meta { };
     CameraFrame result = ShmCamera::convert(tiny, 10, 10, meta, 0.0);
     EXPECT_TRUE(result.gray.empty());
 }
 
 TEST(ShmCameraConvert, WrongTypeInputReturnsEmptyGray) {
     cv::Mat gray(10, 10, CV_8UC1, cv::Scalar(128));
-    hikcamera::FrameMetadata meta { };
+    FrameMetadata meta { };
     CameraFrame result = ShmCamera::convert(gray, 10, 10, meta, 0.0);
     EXPECT_TRUE(result.gray.empty());
 }
@@ -116,21 +116,21 @@ TEST(ShmCameraOpen, RejectsZeroWidth) {
     ShmCamera cam("/nonexistent_shm", 0, 480, 0.0);
     auto result = cam.open();
     EXPECT_FALSE(result.has_value());
-    EXPECT_EQ(result.error().code, hikcamera::FrameReadErrorCode::InvalidFrame);
+    EXPECT_EQ(result.error().code, FrameReadErrorCode::InvalidFrame);
 }
 
 TEST(ShmCameraOpen, RejectsZeroHeight) {
     ShmCamera cam("/nonexistent_shm", 640, 0, 0.0);
     auto result = cam.open();
     EXPECT_FALSE(result.has_value());
-    EXPECT_EQ(result.error().code, hikcamera::FrameReadErrorCode::InvalidFrame);
+    EXPECT_EQ(result.error().code, FrameReadErrorCode::InvalidFrame);
 }
 
 TEST(ShmCameraOpen, RejectsNegativeDimensions) {
     ShmCamera cam("/nonexistent_shm", -1, -1, 0.0);
     auto result = cam.open();
     EXPECT_FALSE(result.has_value());
-    EXPECT_EQ(result.error().code, hikcamera::FrameReadErrorCode::InvalidFrame);
+    EXPECT_EQ(result.error().code, FrameReadErrorCode::InvalidFrame);
 }
 
 // ══════════════════════════════════════════════════════════════════
