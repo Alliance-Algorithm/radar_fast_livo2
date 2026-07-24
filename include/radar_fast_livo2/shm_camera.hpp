@@ -40,17 +40,17 @@ namespace radar::fast_livo2 {
 // their original code; camera-specific failures use InvalidFrame.
 struct ShmCameraError {
     hikcamera::FrameReadErrorCode code;
-    std::string                   message;
+    std::string message;
 };
 
 // ── CameraFrame: one converted grayscale frame with metadata ──────────
 struct CameraFrame {
-    cv::Mat  gray;                // owned CV_8UC1 at target resolution
-    uint64_t sequence{0};         // SHM committed_sequence (strictly increasing)
-    uint64_t host_monotonic_ns{0};// steady-clock epoch nanoseconds
-    uint64_t frame_id{0};         // device frame counter
+    cv::Mat gray;                     // owned CV_8UC1 at target resolution
+    uint64_t sequence { 0 };          // SHM committed_sequence (strictly increasing)
+    uint64_t host_monotonic_ns { 0 }; // steady-clock epoch nanoseconds
+    uint64_t frame_id { 0 };          // device frame counter
 
-    double   timestamp_seconds{0.0};  // host_monotonic_ns/1e9 + img_time_offset
+    double timestamp_seconds { 0.0 }; // host_monotonic_ns/1e9 + img_time_offset
 };
 
 // ── ShmCamera: RAII adapter over hikcamera::SharedFrameReader ─────────
@@ -65,8 +65,7 @@ public:
     /// @param target_width  desired grayscale output width
     /// @param target_height desired grayscale output height
     /// @param img_time_offset additive offset applied to host_monotonic_ns/1e9
-    ShmCamera(std::string shm_name, int target_width, int target_height,
-              double img_time_offset);
+    ShmCamera(std::string shm_name, int target_width, int target_height, double img_time_offset);
 
     ShmCamera(const ShmCamera&)            = delete;
     ShmCamera& operator=(const ShmCamera&) = delete;
@@ -81,28 +80,25 @@ public:
     /// Block until a new frame arrives, convert it, and return.
     /// `timeout` uses CLOCK_MONOTONIC.  Returns ShmCameraError with the
     /// underlying FrameReadErrorCode so callers can branch on code.
-    [[nodiscard]] auto wait_next(std::chrono::milliseconds timeout
-                                 = std::chrono::milliseconds{2000})
-        -> std::expected<CameraFrame, ShmCameraError>;
+    [[nodiscard]] auto wait_next(std::chrono::milliseconds timeout = std::chrono::milliseconds {
+                                     2000 }) -> std::expected<CameraFrame, ShmCameraError>;
 
     [[nodiscard]] auto is_open() const noexcept -> bool;
 
-/// Pure conversion: BGR8 cv::Mat → owned CV_8UC1 at target resolution.
-/// No hardware required — callable from tests.
-/// Allocates source-resolution gray via cvtColor then resize to target;
-/// no full BGR clone is made.
-    [[nodiscard]] static auto convert(const cv::Mat& bgr, int target_width,
-                                       int target_height,
-                                       const hikcamera::FrameMetadata& meta,
-                                       double img_time_offset) -> CameraFrame;
+    /// Pure conversion: BGR8 cv::Mat → owned CV_8UC1 at target resolution.
+    /// No hardware required — callable from tests.
+    /// Allocates source-resolution gray via cvtColor then resize to target;
+    /// no full BGR clone is made.
+    [[nodiscard]] static auto convert(const cv::Mat& bgr, int target_width, int target_height,
+        const hikcamera::FrameMetadata& meta, double img_time_offset) -> CameraFrame;
 
 private:
-    std::string                         shm_name_;
-    int                                 target_width_{0};
-    int                                 target_height_{0};
-    double                              img_time_offset_{0.0};
-    hikcamera::SharedFrameReader        reader_;
-    bool                                is_open_{false};
+    std::string shm_name_;
+    int target_width_ { 0 };
+    int target_height_ { 0 };
+    double img_time_offset_ { 0.0 };
+    hikcamera::SharedFrameReader reader_;
+    bool is_open_ { false };
 };
 
-}  // namespace radar::fast_livo2
+} // namespace radar::fast_livo2

@@ -9,7 +9,7 @@
 namespace radar::fast_livo2 {
 
 CameraFrameQueue::CameraFrameQueue(size_t max_size)
-    : max_size_(max_size) {}
+    : max_size_(max_size) { }
 
 auto CameraFrameQueue::push(CameraFrame frame) -> bool {
     std::lock_guard<std::mutex> lock(mutex_);
@@ -24,19 +24,18 @@ auto CameraFrameQueue::push(CameraFrame frame) -> bool {
     return true;
 }
 
-auto CameraFrameQueue::take_nearest(double target_time,
-                                     double tolerance_sec)
+auto CameraFrameQueue::take_nearest(double target_time, double tolerance_sec)
     -> std::optional<CameraFrame> {
     std::lock_guard<std::mutex> lock(mutex_);
 
     if (frames_.empty()) return std::nullopt;
 
     size_t best_idx = 0;
-    double best_dt = std::numeric_limits<double>::max();
+    double best_dt  = std::numeric_limits<double>::max();
     for (size_t i = 0; i < frames_.size(); ++i) {
         double dt = std::abs(frames_[i].timestamp_seconds - target_time);
         if (dt < best_dt) {
-            best_dt = dt;
+            best_dt  = dt;
             best_idx = i;
         }
     }
@@ -44,8 +43,7 @@ auto CameraFrameQueue::take_nearest(double target_time,
     if (best_dt > tolerance_sec) return std::nullopt;
 
     CameraFrame selected = std::move(frames_[best_idx]);
-    frames_.erase(frames_.begin(),
-                  frames_.begin() + static_cast<long>(best_idx) + 1);
+    frames_.erase(frames_.begin(), frames_.begin() + static_cast<long>(best_idx) + 1);
     return selected;
 }
 
@@ -59,4 +57,4 @@ auto CameraFrameQueue::size() const -> size_t {
     return frames_.size();
 }
 
-}  // namespace radar::fast_livo2
+} // namespace radar::fast_livo2

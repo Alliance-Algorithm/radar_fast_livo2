@@ -34,18 +34,18 @@ public:
     /// Find the frame nearest to `target_time` within `tolerance_sec`
     /// seconds, move its gray mat out, and erase it plus all older frames.
     /// Returns nullopt if no frame is within tolerance.
-    [[nodiscard]] auto take_nearest(double target_time,
-                                     double tolerance_sec) -> std::optional<CameraFrame>;
+    [[nodiscard]] auto take_nearest(double target_time, double tolerance_sec)
+        -> std::optional<CameraFrame>;
 
     [[nodiscard]] auto empty() const -> bool;
     [[nodiscard]] auto size() const -> size_t;
     [[nodiscard]] auto max_size() const noexcept -> size_t { return max_size_; }
 
 private:
-    size_t                         max_size_;
-    uint64_t                       last_accepted_sequence_{0};
-    mutable std::mutex             mutex_;
-    std::deque<CameraFrame>        frames_;
+    size_t max_size_;
+    uint64_t last_accepted_sequence_ { 0 };
+    mutable std::mutex mutex_;
+    std::deque<CameraFrame> frames_;
 };
 
-}  // namespace radar::fast_livo2
+} // namespace radar::fast_livo2

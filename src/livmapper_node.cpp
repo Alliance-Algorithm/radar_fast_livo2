@@ -368,7 +368,8 @@ private:
 
         auto open_result = camera_->open();
         if (!open_result) {
-            throw std::runtime_error("LIVO: failed to open camera SHM: " + open_result.error().message);
+            throw std::runtime_error(
+                "LIVO: failed to open camera SHM: " + open_result.error().message);
         }
         RCLCPP_INFO(get_logger(), "Camera SHM opened, starting capture thread");
 
@@ -396,8 +397,7 @@ private:
                     continue; // timeout: normal, retry
                 }
                 // Fatal reader error: log once, terminate worker
-                RCLCPP_ERROR(get_logger(), "Camera SHM fatal read error: %s",
-                             err.message.c_str());
+                RCLCPP_ERROR(get_logger(), "Camera SHM fatal read error: %s", err.message.c_str());
                 camera_running_.store(false);
                 break;
             }

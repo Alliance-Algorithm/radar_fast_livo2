@@ -5,13 +5,13 @@
 // CameraFrameQueue tests (7-14): push, duplicate, eviction, nearest selection,
 //   tolerance, consume-through, post-consume rejection
 
-#include <gtest/gtest.h>
-#include <opencv2/opencv.hpp>
 #include <cmath>
+#include <gtest/gtest.h>
 #include <limits>
+#include <opencv2/opencv.hpp>
 
-#include "radar_fast_livo2/shm_camera.hpp"
 #include "radar_fast_livo2/camera_frame_queue.hpp"
+#include "radar_fast_livo2/shm_camera.hpp"
 
 using namespace radar::fast_livo2;
 
@@ -30,13 +30,13 @@ TEST(ShmCameraConvert, ConvertsBGR8ToGrayAtTargetResolution) {
         auto* row = bgr.ptr<cv::Vec3b>(r);
         for (int c = 0; c < src_w; ++c) {
             uint8_t v = static_cast<uint8_t>((r + c) % 256);
-            row[c] = cv::Vec3b(v, v, v);
+            row[c]    = cv::Vec3b(v, v, v);
         }
     }
 
-    hikcamera::FrameMetadata meta{};
-    meta.host_monotonic_ns = 1'700'000'000'000ULL;
-    meta.frame_id = 42;
+    hikcamera::FrameMetadata meta { };
+    meta.host_monotonic_ns  = 1'700'000'000'000ULL;
+    meta.frame_id           = 42;
     meta.committed_sequence = 7;
 
     CameraFrame result = ShmCamera::convert(bgr, tgt_w, tgt_h, meta, 0.0);
@@ -48,9 +48,9 @@ TEST(ShmCameraConvert, ConvertsBGR8ToGrayAtTargetResolution) {
 
 TEST(ShmCameraConvert, GrayscaleValuesAreCorrect) {
     cv::Mat bgr(4, 4, CV_8UC3, cv::Scalar(0, 0, 255));
-    hikcamera::FrameMetadata meta{};
-    meta.host_monotonic_ns = 1'000'000'000ULL;
-    meta.frame_id = 1;
+    hikcamera::FrameMetadata meta { };
+    meta.host_monotonic_ns  = 1'000'000'000ULL;
+    meta.frame_id           = 1;
     meta.committed_sequence = 1;
 
     CameraFrame result = ShmCamera::convert(bgr, 4, 4, meta, 0.0);
@@ -65,9 +65,9 @@ TEST(ShmCameraConvert, GrayscaleValuesAreCorrect) {
 
 TEST(ShmCameraConvert, TimestampFromHostMonotonicNsPlusOffset) {
     cv::Mat bgr(2, 2, CV_8UC3, cv::Scalar(128, 128, 128));
-    hikcamera::FrameMetadata meta{};
-    meta.host_monotonic_ns = 1'700'000'000'000ULL;
-    meta.frame_id = 100;
+    hikcamera::FrameMetadata meta { };
+    meta.host_monotonic_ns  = 1'700'000'000'000ULL;
+    meta.frame_id           = 100;
     meta.committed_sequence = 42;
 
     CameraFrame result = ShmCamera::convert(bgr, 2, 2, meta, 0.05);
@@ -78,9 +78,9 @@ TEST(ShmCameraConvert, TimestampFromHostMonotonicNsPlusOffset) {
 
 TEST(ShmCameraConvert, MetadataPreserved) {
     cv::Mat bgr(10, 10, CV_8UC3, cv::Scalar(0, 128, 255));
-    hikcamera::FrameMetadata meta{};
-    meta.host_monotonic_ns = 9'876'543'210'000'000ULL;
-    meta.frame_id = 999;
+    hikcamera::FrameMetadata meta { };
+    meta.host_monotonic_ns  = 9'876'543'210'000'000ULL;
+    meta.frame_id           = 999;
     meta.committed_sequence = 12345;
 
     CameraFrame result = ShmCamera::convert(bgr, 5, 5, meta, 0.01);
@@ -96,14 +96,14 @@ TEST(ShmCameraConvert, MetadataPreserved) {
 
 TEST(ShmCameraConvert, EmptyInputReturnsEmptyGray) {
     cv::Mat tiny(0, 0, CV_8UC3);
-    hikcamera::FrameMetadata meta{};
+    hikcamera::FrameMetadata meta { };
     CameraFrame result = ShmCamera::convert(tiny, 10, 10, meta, 0.0);
     EXPECT_TRUE(result.gray.empty());
 }
 
 TEST(ShmCameraConvert, WrongTypeInputReturnsEmptyGray) {
     cv::Mat gray(10, 10, CV_8UC1, cv::Scalar(128));
-    hikcamera::FrameMetadata meta{};
+    hikcamera::FrameMetadata meta { };
     CameraFrame result = ShmCamera::convert(gray, 10, 10, meta, 0.0);
     EXPECT_TRUE(result.gray.empty());
 }
@@ -139,8 +139,8 @@ TEST(ShmCameraOpen, RejectsNegativeDimensions) {
 
 static auto make_frame(uint64_t seq, double ts) -> CameraFrame {
     CameraFrame f;
-    f.gray = cv::Mat(2, 2, CV_8UC1, cv::Scalar(static_cast<uint8_t>(seq)));
-    f.sequence = seq;
+    f.gray              = cv::Mat(2, 2, CV_8UC1, cv::Scalar(static_cast<uint8_t>(seq)));
+    f.sequence          = seq;
     f.timestamp_seconds = ts;
     return f;
 }
@@ -179,7 +179,7 @@ TEST(CameraFrameQueue, RejectsEvictedOldSequence) {
     CameraFrameQueue q(2);
     EXPECT_TRUE(q.push(make_frame(1, 1.0)));
     EXPECT_TRUE(q.push(make_frame(2, 2.0)));
-    EXPECT_TRUE(q.push(make_frame(3, 3.0)));  // evicts seq 1
+    EXPECT_TRUE(q.push(make_frame(3, 3.0))); // evicts seq 1
     EXPECT_EQ(q.size(), 2u);
     EXPECT_FALSE(q.push(make_frame(1, 1.5)));
     EXPECT_EQ(q.size(), 2u);
