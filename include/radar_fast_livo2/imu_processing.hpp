@@ -54,7 +54,7 @@ public:
     double last_prop_end_time() const { return last_prop_end_time_; }
 
     bool imu_en        = true;
-    int init_imu_num   = 20;   // 静止初始化需要的 Lidar 帧数（非 IMU 样本数）
+    int init_imu_num   = 400;  // 静止初始化需要的 IMU 样本数
     bool gravity_align = true; // 是否对齐重力方向
 
 private:

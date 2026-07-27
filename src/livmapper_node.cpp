@@ -6,9 +6,12 @@
 //   /odin1/imu        (sensor_msgs::msg::Imu)           - 400Hz IMU
 //
 // 相机输入（仅 LIVO 模式）:
-//   不订阅 ROS Image topic；通过 hikcamera::SharedFrameReader 从 POSIX
-//   共享内存直接读取 HIK 相机帧（BGR8 → gray CV_8UC1 @ 目标分辨率）。
-//   相机线程在 img_en_=true 时启动，持续等待 SHM 新帧并写入内部队列。
+//   camera_input_mode: "shm"（默认） — 通过 raw hikcamera::imageSHM 从 POSIX
+//     共享内存直接读取 HIK 相机帧（RGB → gray CV_8UC1 @ 目标分辨率）。
+//     相机线程在 img_en_=true 时启动，持续等待 SHM 新帧并写入内部队列。
+//   camera_input_mode: "ros_image"（MCAP 回放） — 订阅 ROS Image topic
+//     （sensor_msgs/Image，BGR8），ROS 时间戳直接使用，不应用 img_time_offset。
+//     不初始化 ShmCamera 或 SHM 捕获线程。
 //
 // 发布:
 //   /fast_livo2/odom        (nav_msgs::msg::Odometry)
@@ -29,6 +32,7 @@
 #include "radar_fast_livo2/esikf_state.hpp"
 #include "radar_fast_livo2/imu_processing.hpp"
 #include "radar_fast_livo2/preprocess.hpp"
+#include "radar_fast_livo2/ros_image_camera.hpp"
 #include "radar_fast_livo2/shm_camera.hpp"
 #include "radar_fast_livo2/vio.hpp"
 
@@ -39,20 +43,27 @@
 #include <pcl/io/pcd_io.h>
 #include <pcl_conversions/pcl_conversions.h>
 #include <rclcpp/rclcpp.hpp>
+#include <sensor_msgs/msg/image.hpp>
 #include <sensor_msgs/msg/imu.hpp>
 #include <sensor_msgs/msg/point_cloud2.hpp>
 #include <tf2_ros/transform_broadcaster.h>
 
 #include <array>
+#include <atomic>
 #include <chrono>
+#include <condition_variable>
+#include <cmath>
 #include <deque>
 #include <filesystem>
+#include <algorithm>
 #include <limits>
 #include <mutex>
+#include <optional>
 #include <string>
 #include <thread>
 #include <unordered_map>
 
+#include "radar_fast_livo2/lio_drift_diagnostics.hpp"
 #include "radar_fast_livo2/voxel_map.hpp"
 
 namespace radar::fast_livo2 {
@@ -66,6 +77,8 @@ public:
         init_subscribers();
         init_publishers();
         start_camera(); // 仅在 LIVO 模式启动 SHM 相机线程
+        processing_running_.store(true);
+        processing_thread_ = std::thread([this]() { processing_loop(); });
         // HACK: 手动 SLAM 保存触发用轮询文件（约定同 Odin1 厂商驱动的
         // "echo 'set save_map 1' > /tmp/odin_command.txt"），而非 ROS2
         // Service/信号处理器——PCL 的 savePCDFileBinary 内部有动态内存
@@ -81,6 +94,9 @@ public:
 
     ~LivMapperNode() override {
         stop_camera(); // 先停相机线程
+        processing_running_.store(false);
+        process_signal_cv_.notify_all();
+        if (processing_thread_.joinable()) processing_thread_.join();
         save_pcd();
     }
 
@@ -93,6 +109,16 @@ private:
 
         // Camera SHM（替换原 img_topic）
         declare_parameter("camera/shm_name", std::string("/hikcamera_shm"));
+        // camera_input_mode: "shm"（默认，现有行为）或 "ros_image"（MCAP 回放）
+        declare_parameter("camera_input_mode", std::string("shm"));
+        // camera/image_topic: ROS Image topic，仅 ros_image 模式使用
+        declare_parameter("camera/image_topic", std::string("/fast_livo2/camera/bgr8"));
+        // shm_image_width/height: raw SHM RGB resolution written by the HIK driver.
+        // Must match hikcamera.yaml width/height (5472×3648).  These are the
+        // source dimensions for ShmCamera; separate from cam_width/cam_height
+        // which describe the VIO grayscale working resolution after downsample.
+        declare_parameter("camera/shm_image_width", 5472);
+        declare_parameter("camera/shm_image_height", 3648);
 
         // Sensor config
         declare_parameter("lidar_type", static_cast<int>(LidarType::ODIN1));
@@ -107,7 +133,7 @@ private:
 
         // IMU
         declare_parameter("imu_en", true);
-        declare_parameter("init_imu_num", 20);
+        declare_parameter("init_imu_num", 400);
         // 陀螺仪/加速度计噪声协方差 (rad/s、m/s^2，单位 per sqrt(Hz))。
         // 默认值 0.1 是 imu_processing.hpp 里未针对 Odin1 400Hz IMU 调过的占位值，
         // 在大场景(有效特征数千+)、帧耗时变长(~150ms)时会让 ESIKF 先验协方差
@@ -115,13 +141,13 @@ private:
         // 引发静止状态下的发散（已用 Oracle 诊断确认）。
         declare_parameter("gyr_cov", 0.01);
         declare_parameter("acc_cov", 0.01);
-        // bias 随机游走协方差（bias 变化速率，与上面的测量白噪声物理含义
-        // 不同）。原版 FAST-LIVO2 也是硬编码 0.0001（LIVMapper.cpp 里
-        // set_gyr_bias_cov/set_acc_bias_cov 从不读 yaml），比测量噪声小
-        // 1000 倍是标准 ESIKF/INS 做法（bias 是缓慢温漂，不应被当成瞬时
-        // 噪声一样快速跟踪）。此处开放为参数仅为方便调参，默认值不改。
-        declare_parameter("gyr_bias_cov", 0.0001);
-        declare_parameter("acc_bias_cov", 0.0001);
+        // bias 随机游走协方差（bias 变化速率）。
+        // 对齐官方 FAST-LIVO2 源码 IMU_Processing.cpp 构造函数硬编码值 0.1：
+        //   cov_bias_gyr = V3D(0.1, 0.1, 0.1);
+        //   cov_bias_acc = V3D(0.1, 0.1, 0.1);
+        // 0.1 允许 bias 在几帧内快速收敛（官方默认不从 init 数据赋初值）。
+        declare_parameter("gyr_bias_cov", 0.1);
+        declare_parameter("acc_bias_cov", 0.1);
         // 默认0：Odin1 在 use_host_ros_time=0 下各 topic 已共享统一时钟，
         // 详见 config/odin_livo2.yaml 内说明，通常不需要调整。
         declare_parameter("imu_time_offset", 0.0);
@@ -149,6 +175,11 @@ private:
         // VIO
         declare_parameter("patch_size", 8);
         declare_parameter("patch_pyramid_level", 4);
+        // This is only a sensor-time association window. It does not gate or
+        // reject any ESIKF state update.
+        declare_parameter("camera/sync_tolerance_sec", 0.12);
+        declare_parameter("camera/queue_size", 200);
+        declare_parameter("camera/sync_diag_en", true);
 
         // Map (downsampling + voxel map config)
         declare_parameter("filter_size_surf", 0.1);
@@ -236,21 +267,56 @@ private:
         imu_time_offset_ = get_parameter("imu_time_offset").as_double();
         img_scale_       = get_parameter("img_scale").as_double();
 
-        // ── ShmCamera 初始化（仅 LIVO 模式）──
-        if (img_en_) {
-            const std::string shm_name = get_parameter("camera/shm_name").as_string();
-            const int cam_width        = get_parameter("cam_width").as_int();
-            const int cam_height       = get_parameter("cam_height").as_int();
+        camera_queue_size_ = static_cast<size_t>(std::max<int64_t>(
+            1, get_parameter("camera/queue_size").as_int()));
+        camera_sync_tolerance_sec_ = get_parameter("camera/sync_tolerance_sec").as_double();
+        camera_sync_diag_en_ = get_parameter("camera/sync_diag_en").as_bool();
+        camera_queue_.set_max_size(camera_queue_size_);
 
-            if (cam_width <= 0 || cam_height <= 0) {
+        // ── Camera 初始化（仅 LIVO 模式）──
+        // 支持两种输入模式：shm（默认，现有行为）和 ros_image（MCAP 回放）
+        if (img_en_) {
+            camera_input_mode_ = get_parameter("camera_input_mode").as_string();
+            if (camera_input_mode_ != "shm" && camera_input_mode_ != "ros_image") {
+                throw std::runtime_error(
+                    "camera_input_mode must be 'shm' or 'ros_image', got: '"
+                    + camera_input_mode_ + "'");
+            }
+            camera_image_topic_ = get_parameter("camera/image_topic").as_string();
+            RosImageCamera::validate_topic_not_empty(
+                camera_input_mode_, camera_image_topic_);
+
+            cam_width_  = get_parameter("cam_width").as_int();
+            cam_height_ = get_parameter("cam_height").as_int();
+
+            if (cam_width_ <= 0 || cam_height_ <= 0) {
                 throw std::runtime_error("LIVO: invalid camera size (cam_width/height)");
             }
 
-            camera_ =
-                std::make_unique<ShmCamera>(shm_name, cam_width, cam_height, img_time_offset_);
-
-            RCLCPP_INFO(get_logger(), "Camera SHM: '%s' → %dx%d gray, offset=%.3fs",
-                shm_name.c_str(), cam_width, cam_height, img_time_offset_);
+            if (camera_input_mode_ == "shm") {
+                const std::string shm_name = get_parameter("camera/shm_name").as_string();
+                int shm_image_w = get_parameter("camera/shm_image_width").as_int();
+                int shm_image_h = get_parameter("camera/shm_image_height").as_int();
+                if (shm_image_w <= 0 || shm_image_h <= 0) {
+                    throw std::runtime_error(
+                        "LIVO: invalid SHM image size (shm_image_width/height)");
+                }
+                camera_ = std::make_unique<ShmCamera>(
+                    shm_name,
+                    shm_image_w, shm_image_h,
+                    cam_width_, cam_height_,
+                    img_time_offset_);
+                RCLCPP_INFO(get_logger(),
+                    "Camera SHM: '%s' source=%dx%d → target=%dx%d gray (RGB→GRAY+resize), "
+                    "offset=%.3fs",
+                    shm_name.c_str(), shm_image_w, shm_image_h,
+                    cam_width_, cam_height_, img_time_offset_);
+            } else {
+                RCLCPP_INFO(get_logger(),
+                    "Camera ROS Image: topic='%s' -> %dx%d gray, queue=%zu",
+                    camera_image_topic_.c_str(), cam_width_, cam_height_,
+                    camera_queue_size_);
+            }
         }
 
         // ── VIOManager 初始化（仅 LIVO 模式）──
@@ -269,13 +335,11 @@ private:
             M3D rcl;
             rcl << rcl_[0], rcl_[1], rcl_[2], rcl_[3], rcl_[4], rcl_[5], rcl_[6], rcl_[7], rcl_[8];
 
+            // cam_width/cam_height already loaded above
             const double cam_fx = get_parameter("cam_fx").as_double();
             const double cam_fy = get_parameter("cam_fy").as_double();
             const double cam_cx = get_parameter("cam_cx").as_double();
             const double cam_cy = get_parameter("cam_cy").as_double();
-            // cam_width/cam_height already loaded above
-            const int cam_width           = get_parameter("cam_width").as_int();
-            const int cam_height          = get_parameter("cam_height").as_int();
             const int patch_size          = get_parameter("patch_size").as_int();
             const int patch_pyramid_level = get_parameter("patch_pyramid_level").as_int();
 
@@ -290,19 +354,19 @@ private:
                     "LIVO: Rcl/Pcl still identity/zero — fill real LiDAR-Camera "
                     "extrinsics before trusting visual updates");
             }
-            if (cam_width <= 0 || cam_height <= 0 || cam_fx <= 1.0 || cam_fy <= 1.0) {
+            if (cam_width_ <= 0 || cam_height_ <= 0 || cam_fx <= 1.0 || cam_fy <= 1.0) {
                 throw std::runtime_error("LIVO: invalid camera intrinsics/size "
                                          "(cam_fx/fy/width/height)");
             }
 
-            vio_manager_.init(cam_fx, cam_fy, cam_cx, cam_cy, cam_width, cam_height, rcl, pcl, Rli,
+            vio_manager_.init(cam_fx, cam_fy, cam_cx, cam_cy, cam_width_, cam_height_, rcl, pcl, Rli,
                 Pli, patch_size, patch_pyramid_level, /*grid_size=*/20,
                 /*normal_en=*/true, /*ncc_en=*/true,
                 /*img_point_cov=*/100.0, /*ncc_thre=*/0.6,
                 /*max_iterations=*/5);
             RCLCPP_INFO(get_logger(),
-                "VIO extrinsics: Rli=R_il^T applied; cam %dx%d fx=%.1f fy=%.1f", cam_width,
-                cam_height, cam_fx, cam_fy);
+                "VIO extrinsics: Rli=R_il^T applied; cam %dx%d fx=%.1f fy=%.1f", cam_width_,
+                cam_height_, cam_fx, cam_fy);
         }
 
         // 降采样参数
@@ -361,29 +425,42 @@ private:
 
     // ── 相机线程管理 ─────────────────────────────────────────────
 
-    /// 仅在 img_en_ 为 true 时打开 SHM 并启动采集线程。
-    /// 打开失败直接抛异常退出节点构造。
+    /// 仅在 img_en_ 为 true 时启动相机输入。
+    /// shm 模式：打开 SHM 并启动采集线程，打开失败抛异常。
+    /// ros_image 模式：创建 ROS Image 订阅，无需线程。
     void start_camera() {
-        if (!img_en_ || !camera_) return;
+        if (!img_en_) return;
 
-        auto open_result = camera_->open();
-        if (!open_result) {
-            throw std::runtime_error(
-                "LIVO: failed to open camera SHM: " + open_result.error().message);
+        if (camera_input_mode_ == "shm") {
+            if (!camera_) return;
+            auto open_result = camera_->open();
+            if (!open_result) {
+                throw std::runtime_error(
+                    "LIVO: failed to open camera SHM: " + open_result.error().message);
+            }
+            RCLCPP_INFO(get_logger(), "Camera SHM opened, starting capture thread");
+            camera_running_.store(true);
+            camera_thread_ = std::thread([this]() { camera_loop(); });
+        } else if (camera_input_mode_ == "ros_image") {
+            sub_image_ = create_subscription<sensor_msgs::msg::Image>(
+                camera_image_topic_, rclcpp::SensorDataQoS(),
+                [this](const sensor_msgs::msg::Image::SharedPtr msg) { on_image(msg); });
+            RCLCPP_INFO(get_logger(),
+                "Camera ROS Image subscription created on '%s'",
+                camera_image_topic_.c_str());
         }
-        RCLCPP_INFO(get_logger(), "Camera SHM opened, starting capture thread");
-
-        camera_running_.store(true);
-        camera_thread_ = std::thread([this]() { camera_loop(); });
     }
 
     /// Set running=false, then join the camera thread unconditionally.
     /// wait_next uses 200ms timeout, so join is bounded by that + conversion.
     /// Also joins if the thread already exited itself (running flag already false).
+    /// ros_image mode: no thread to join; subscription is RAII.
     void stop_camera() {
-        camera_running_.store(false);
-        if (camera_thread_.joinable()) {
-            camera_thread_.join();
+        if (camera_input_mode_ == "shm") {
+            camera_running_.store(false);
+            if (camera_thread_.joinable()) {
+                camera_thread_.join();
+            }
         }
     }
 
@@ -393,7 +470,7 @@ private:
             auto result = camera_->wait_next(std::chrono::milliseconds(200));
             if (!result) {
                 const auto& err = result.error();
-                if (err.code == hikcamera::FrameReadErrorCode::Timeout) {
+                if (err.code == ShmCameraErrorCode::Timeout) {
                     continue; // timeout: normal, retry
                 }
                 // Fatal reader error: log once, terminate worker
@@ -403,7 +480,17 @@ private:
             }
 
             std::ignore = camera_queue_.push(std::move(*result));
+            request_processing();
         }
+    }
+
+    /// ROS Image 回调（ros_image 模式）：验证 BGR8，转灰度 → 入队
+    void on_image(const sensor_msgs::msg::Image::SharedPtr msg) {
+        auto frame = RosImageCamera::convert(
+            *msg, cam_width_, cam_height_, ++ros_image_seq_);
+        if (!frame.has_value()) return;
+        std::ignore = camera_queue_.push(std::move(*frame));
+        request_processing();
     }
 
     // ── 订阅 ────────────────────────────────────────────────────
@@ -435,24 +522,8 @@ private:
                 msg->linear_acceleration.z };
             d.gyro = { msg->angular_velocity.x, msg->angular_velocity.y, msg->angular_velocity.z };
             imu_buf_.push_back(d);
-            // FIXME (Oracle 架构裁决): 固定 2s wall-clock 窗口对齐上游"处理
-            // 完就 pop"语义后发现有隐患——若处理卡顿超过 2s（比如探索大片
-            // 新区域时 UpdateVoxelMap 耗时飙升），会把 imu_process_ 尚未消
-            // 费到的样本一起裁掉，造成永久积分 gap（等价于强行丢帧，且比
-            // 显式丢帧更隐蔽）。改为按 imu_process_.last_prop_end_time()
-            // 裁剪：只删已经被 undistort_pcl 消费过的样本，留一点 margin
-            // 防止 undistort_pcl 内部桥接用的 last_imu_ 被误删。
-            const double consumed_before = imu_process_.last_prop_end_time() - 0.1;
-            auto it                      = imu_buf_.begin();
-            while (it != imu_buf_.end() && it->timestamp < consumed_before)
-                ++it;
-            if (it != imu_buf_.begin()) imu_buf_.erase(imu_buf_.begin(), it);
         }
-        // 若上一帧因 IMU 未追上而挂在 lidar_buf_ 里等待重试，这里顺带
-        // 尝一次（IMU 400Hz 到达，比等下一个 10Hz LiDAR 帧触发重试快得
-        // 多）。process_frame() 内部在 lidar_buf_ 为空或 IMU 仍不足时
-        // 会快速 return，正常路径下这个额外调用几乎零开销。
-        process_frame();
+        request_processing();
     }
 
     void on_lidar(const sensor_msgs::msg::PointCloud2::SharedPtr msg) {
@@ -472,15 +543,78 @@ private:
             std::lock_guard<std::mutex> lock(lidar_buf_mutex_);
             lidar_buf_.push_back(msg);
         }
-        // 同步处理（单线程，LiDAR 帧到达时触发；此时已不持有 lidar_buf_mutex_）
-        process_frame();
+        request_processing();
+    }
+
+    void request_processing() {
+        {
+            std::lock_guard<std::mutex> lock(process_signal_mutex_);
+            process_requested_ = true;
+        }
+        process_signal_cv_.notify_one();
+    }
+
+    void trim_consumed_imu() {
+        if (!imu_process_.imu_en) return;
+
+        const double consumed_until = imu_process_.last_prop_end_time();
+        if (consumed_until <= 0.0) return;
+
+        std::lock_guard<std::mutex> lock(imu_buf_mutex_);
+        const auto first_unconsumed = std::upper_bound(
+            imu_buf_.begin(), imu_buf_.end(), consumed_until,
+            [](double timestamp, const ImuData& imu) {
+                return timestamp < imu.timestamp;
+            });
+        imu_buf_.erase(imu_buf_.begin(), first_unconsumed);
+    }
+
+    void processing_loop() {
+        while (true) {
+            std::unique_lock<std::mutex> lock(process_signal_mutex_);
+            process_signal_cv_.wait(lock, [this]() {
+                return process_requested_ || !processing_running_.load();
+            });
+            if (!processing_running_.load()) return;
+            process_requested_ = false;
+            lock.unlock();
+            process_frame();
+        }
+    }
+
+    double camera_match_time(double frame_beg, double frame_end) const {
+        (void)frame_end;
+        return frame_beg;
     }
 
     // 从相机队列中选时间最接近的一帧并消费之。
-    // 超过 50ms 容忍范围时返回 false，跳过本帧 VIO。
-    bool get_nearest_image(double target_time, cv::Mat& out_gray) {
-        auto result = camera_queue_.take_nearest(target_time, 0.05);
-        if (!result) return false;
+    // 超过 camera/sync_tolerance_sec 容忍范围时返回 false，跳过本帧 VIO。
+    bool get_nearest_image(double target_time, double frame_duration, cv::Mat& out_gray) {
+        const auto nearest = camera_queue_.nearest_timestamp(target_time);
+        const auto oldest  = camera_queue_.oldest_timestamp();
+        const size_t queue_size = camera_queue_.size();
+        auto result = camera_queue_.take_nearest(target_time, camera_sync_tolerance_sec_);
+        if (!result) {
+            if (camera_sync_diag_en_) {
+                const double nearest_dt = nearest ? (*nearest - target_time) : 0.0;
+                const double oldest_age = oldest ? (target_time - *oldest) : 0.0;
+                RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 2000,
+                    "VIO sync miss: target=%.3f tol=%.3fs frame_dt=%.1fms "
+                    "queue=%zu nearest_dt=%s%.1fms oldest_age=%s%.1fms",
+                    target_time, camera_sync_tolerance_sec_, frame_duration * 1000.0, queue_size,
+                    nearest ? "" : "n/a ", nearest ? nearest_dt * 1000.0 : 0.0,
+                    oldest ? "" : "n/a ", oldest ? oldest_age * 1000.0 : 0.0);
+            }
+            return false;
+        }
+
+        const double dt = result->timestamp_seconds - target_time;
+        if (camera_sync_diag_en_) {
+            RCLCPP_INFO_THROTTLE(get_logger(), *get_clock(), 5000,
+                "VIO sync hit: target=%.3f image=%.3f dt=%.1fms frame_dt=%.1fms queue=%zu",
+                target_time, result->timestamp_seconds, dt * 1000.0, frame_duration * 1000.0,
+                queue_size);
+        }
         out_gray = std::move(result->gray);
         return true;
     }
@@ -525,25 +659,44 @@ private:
         }
 
         // ── 2. 预处理: ROS PointCloud2 → PointCloudT (raw) ──
+        // IMU callbacks retry the same front LiDAR frame until IMU catches up.
+        // Cache the preprocessed front frame so those retries do not repeatedly
+        // parse tens of thousands of points and starve image callbacks.
         auto raw_cloud = std::make_shared<PointCloudT>();
-        preprocess_.process(lidar_msg, raw_cloud);
+        double frame_beg = 0.0;
+        double frame_end = 0.0;
+        if (pending_lidar_msg_.get() == lidar_msg.get() && pending_raw_cloud_) {
+            raw_cloud = pending_raw_cloud_;
+            frame_beg = pending_frame_beg_;
+            frame_end = pending_frame_end_;
+        } else {
+            preprocess_.process(lidar_msg, raw_cloud);
+            frame_beg = rclcpp::Time(lidar_msg->header.stamp).seconds();
+            frame_end = frame_beg;
+            for (size_t i = 0; i < raw_cloud->points.size(); ++i) {
+                double pt_time = frame_beg + raw_cloud->points[i].curvature / 1000.0;
+                if (pt_time > frame_end) frame_end = pt_time;
+            }
+            if (frame_end <= frame_beg) frame_end = frame_beg + 0.005;
+
+            pending_lidar_msg_ = lidar_msg;
+            pending_raw_cloud_ = raw_cloud;
+            pending_frame_beg_ = frame_beg;
+            pending_frame_end_ = frame_end;
+        }
         if (raw_cloud->empty()) {
             RCLCPP_WARN_THROTTLE(
                 get_logger(), *get_clock(), 2000, "Empty point cloud after preprocessing");
             // 空点云无法恢复，此帧真正丢弃（非 IMU 未就绪的可重试场景）
             std::lock_guard<std::mutex> lock(lidar_buf_mutex_);
             if (!lidar_buf_.empty()) lidar_buf_.pop_front();
+            pending_lidar_msg_.reset();
+            pending_raw_cloud_.reset();
             return;
         }
 
         // ── 3. 收集 IMU 数据 ──
-        double frame_beg = rclcpp::Time(lidar_msg->header.stamp).seconds();
-        double frame_end = frame_beg;
-        for (size_t i = 0; i < raw_cloud->points.size(); ++i) {
-            double pt_time = frame_beg + raw_cloud->points[i].curvature / 1000.0;
-            if (pt_time > frame_end) frame_end = pt_time;
-        }
-        if (frame_end <= frame_beg) frame_end = frame_beg + 0.005;
+        const double frame_duration = frame_end - frame_beg;
 
         MeasureGroup meas;
         meas.lidar_beg_time = frame_beg;
@@ -552,21 +705,20 @@ private:
 
         if (imu_process_.imu_en) {
             std::lock_guard<std::mutex> lock(imu_buf_mutex_);
-            // IMU 窗口取所有 <= frame_end+margin 的样本（不设下界），由
+            // IMU 窗口取所有 <= frame_end 的样本（不设下界），由
             // undistort_pcl 内部的 prop_beg_time 门控自动跳过早于上帧末
             // （last_prop_end_time_）的部分，从而覆盖 [last_prop_end_time_,
             // frame_end] 的完整积分区间，不依赖 frame_beg 本身。
-            const double margin = 0.02;
             meas.imu.reserve(512);
             for (size_t i = 0; i < imu_buf_.size(); ++i) {
                 const auto& imu = imu_buf_[i];
-                if (imu.timestamp <= frame_end + margin) {
+                if (imu.timestamp <= frame_end) {
                     meas.imu.push_back(imu);
                 }
             }
             // IMU 还没追上这一帧的结束时间：不丢帧，直接 return 重试
             // （帧还在 lidar_buf_.front()，下次任意回调触发时会重新窥视）。
-            if (imu_buf_.empty() || imu_buf_.back().timestamp < frame_end + margin) {
+            if (imu_buf_.empty() || imu_buf_.back().timestamp < frame_end) {
                 return;
             }
             if (meas.imu.size() < 2) {
@@ -582,10 +734,13 @@ private:
             std::lock_guard<std::mutex> lock(lidar_buf_mutex_);
             if (!lidar_buf_.empty()) lidar_buf_.pop_front();
         }
+        pending_lidar_msg_.reset();
+        pending_raw_cloud_.reset();
 
         // ── 4. IMU 去畸变 ──
         auto feats_undistort = std::make_shared<PointCloudT>();
         bool imu_ok          = imu_process_.process(meas, state_, feats_undistort);
+        trim_consumed_imu();
         if (!imu_ok) {
             return;
         }
@@ -674,33 +829,42 @@ private:
             voxel_map_.pv_list_[i].var = var;
         }
 
-        // HACK: 曾在有效特征过低时跳过地图更新，防止 state_ 不可信时把
-        // 错误点/平面参数写进 voxel_map_ 形成发散循环（修复过静止场景下
-        // frame 234+ 的振荡发散）。但该保护在"移动到地图未覆盖新区域"场景
-        // 下会死锁：新区域本来就没有匹配点 → effective 特征天然低于阈值
-        // → 保护触发冻住地图 → 地图永远无法扩展到新区域 → 特征永远起不来
-        // （三次实测复现：无论怎么调外参/IMU协方差，只要挪到新区域必然
-        // 归零发散，说明这是死锁而非参数问题）。静止振荡发散已经用
-        // gyr_cov/acc_cov/sigma_num/协方差地板四项参数修复，不再需要这层
-        // 保护，故移除，让地图始终随着移动扩展覆盖范围。
-        voxel_map_.UpdateVoxelMap(voxel_map_.pv_list_);
+        // Guard: skip voxel map update when effective features are too low
+        // to prevent a transient state divergence from permanently corrupting
+        // the voxel map (e.g. during aggressive turns where LiDAR constraints
+        // momentarily weaken).  State estimation itself still runs so the
+        // ESIKF can recover on subsequent frames with stronger constraints.
+        const double eff_ratio = static_cast<double>(voxel_map_.effct_feat_num_)
+            / static_cast<double>(feats_down_size);
+        const bool safe_to_update = (eff_ratio >= 0.15 && voxel_map_.effct_feat_num_ >= 600);
+        if (safe_to_update) {
+            voxel_map_.UpdateVoxelMap(voxel_map_.pv_list_);
+        } else {
+            RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 2000,
+                "Skip UpdateVoxelMap: eff=%d/down=%d (%.1f%%) — state may be unreliable",
+                voxel_map_.effct_feat_num_, feats_down_size, eff_ratio * 100.0);
+        }
 
         auto t3 = clock::now();
 
         // ── 9.5. VIO 光度更新（仅 LIVO 模式，且找到时间匹配的图像帧）──
         if (img_en_) {
             cv::Mat gray;
-            if (get_nearest_image(frame_end, gray)) {
+            const double target_image_time = camera_match_time(frame_beg, frame_end);
+            if (get_nearest_image(target_image_time, frame_duration, gray)) {
                 vio_manager_.state_          = &state_;
                 vio_manager_.state_propagat_ = &state_propagat;
                 vio_manager_.processFrame(gray, voxel_map_.pv_list_, voxel_map_.voxel_map_);
             } else {
                 RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 5000,
-                    "VIO: no camera frame within 50ms of LiDAR timestamp t=%.3f "
-                    "— calibrate img_time_offset and verify clock domains",
-                    frame_end);
+                    "VIO: no camera frame within %.0fms of target t=%.3f",
+                    camera_sync_tolerance_sec_ * 1000.0, target_image_time);
             }
         }
+
+        // VIO can update state_. Rebuild the published cloud from the final
+        // state so cloud, odometry, path and TF describe the same pose.
+        voxel_map_.TransformLidar(state_.rot_end, state_.pos_end, feats_down_body, world_lidar);
 
         // ── 10. 地图滑动 ──
         if (voxel_config_.map_sliding_en) {
@@ -713,13 +877,17 @@ private:
         publish_odometry(frame_end);
 
         // ── 12. 发布世界系点云 ──
-        publish_cloud_world(world_lidar, lidar_msg->header.stamp);
+        const int64_t output_ns = static_cast<int64_t>(std::llround(frame_end * 1e9));
+        builtin_interfaces::msg::Time output_stamp;
+        output_stamp.sec = static_cast<int32_t>(output_ns / 1000000000LL);
+        output_stamp.nanosec = static_cast<uint32_t>(output_ns % 1000000000LL);
+        publish_cloud_world(world_lidar, output_stamp);
 
         // ── 13. 发布 path ──
-        publish_path(lidar_msg->header.stamp);
+        publish_path(output_stamp);
 
         // ── 14. 发布 TF ──
-        publish_tf(lidar_msg->header.stamp);
+        publish_tf(output_stamp);
 
         // ── 15. PCD 累积 + 定期刷盘 ──
         if (pcd_save_en_ && frame_count_ >= pcd_save_warmup_frames_) {
@@ -758,6 +926,28 @@ private:
             std::chrono::duration<double>(t2 - t1).count() * 1000,
             std::chrono::duration<double>(t3 - t2).count() * 1000, t_total * 1000, avg_time_ * 1000,
             static_cast<int>(feats_undistort->size()), feats_down_size, voxel_map_.effct_feat_num_);
+
+        // ── 17. LIO drift diagnostics (ONLY_LIO, 1Hz throttled) ──
+        if (lidar_map_inited_) {
+            if (!drift_ref_captured_) {
+                drift_ref_position_ = state_.pos_end;
+                last_drift_position_ = state_.pos_end;
+                drift_ref_captured_ = true;
+            }
+            total_path_ += (state_.pos_end - last_drift_position_).norm();
+            last_drift_position_ = state_.pos_end;
+
+            const auto diag = compute_lio_drift_metrics(
+                frame_count_, state_, state_propagat, drift_ref_position_);
+
+            RCLCPP_INFO_THROTTLE(get_logger(), *get_clock(), 1000,
+                "[DRIFT] fr=%d | disp=%.3fm path=%.1fm | spd=%.2f | dP=%.3fm | dR=%.2fdeg"
+                " | bg=%.5f | ba=%.5f | cov_r=%.2e cov_p=%.2e cov_v=%.2e",
+                diag.frame_count, diag.displacement, total_path_, diag.speed_norm,
+                diag.pos_correction, diag.ang_correction,
+                diag.gyro_bias_norm, diag.accel_bias_norm,
+                diag.cov_rot, diag.cov_pos, diag.cov_vel);
+        }
     }
 
     // ── 发布函数 ────────────────────────────────────────────────
@@ -884,6 +1074,9 @@ private:
     double img_time_offset_      = 0.0;
     double imu_time_offset_      = 0.0;
     double img_scale_            = 0.5;
+    double camera_sync_tolerance_sec_ = 0.12;
+    size_t camera_queue_size_ = 30;
+    bool camera_sync_diag_en_ = true;
     double filter_size_surf_     = 0.1;
     bool pcd_save_en_            = false;
     int pcd_save_interval_       = -1;
@@ -898,22 +1091,45 @@ private:
     ImuProcess imu_process_;
 
     // ── SHM 相机（仅 LIVO 模式）──
-    std::unique_ptr<ShmCamera> camera_; // SharedFrameReader adapter
+    std::unique_ptr<ShmCamera> camera_; // raw imageSHM adapter
     std::thread camera_thread_;         // 采集线程
     std::atomic<bool> camera_running_ { false };
     CameraFrameQueue camera_queue_ { 5 }; // bounded ≤5, at-most-once per sequence
 
+    // ── ROS Image 相机（仅 ros_image 模式）──
+    std::string camera_input_mode_ { "shm" };   // "shm" or "ros_image"
+    std::string camera_image_topic_;             // ROS Image topic name
+    rclcpp::Subscription<sensor_msgs::msg::Image>::SharedPtr sub_image_;
+    std::atomic<uint64_t> ros_image_seq_ { 0 };  // monotonically-increasing local sequence
+    int cam_width_ { 0 };
+    int cam_height_ { 0 };
+
     // 缓冲区（各自有独立互斥锁）
     std::mutex imu_buf_mutex_;
     std::mutex lidar_buf_mutex_;
+    std::mutex process_signal_mutex_;
+    std::condition_variable process_signal_cv_;
+    std::atomic<bool> processing_running_ { false };
+    std::thread processing_thread_;
+    bool process_requested_ = false;
     std::vector<ImuData, Eigen::aligned_allocator<ImuData>> imu_buf_;
     std::deque<sensor_msgs::msg::PointCloud2::SharedPtr> lidar_buf_;
+    sensor_msgs::msg::PointCloud2::SharedPtr pending_lidar_msg_;
+    PointCloudT::Ptr pending_raw_cloud_;
+    double pending_frame_beg_ = 0.0;
+    double pending_frame_end_ = 0.0;
 
     // 体素地图管理器（替换原来的 ikd-Tree）
     VoxelMapManager voxel_map_;
     VoxelMapConfig voxel_config_;
     StatesGroup state_; // ESIKF 状态（持续跨帧更新）
     bool lidar_map_inited_ = false;
+
+    // LIO drift diagnostics reference (captured after first post-init posterior)
+    V3D drift_ref_position_ = V3D::Zero();
+    bool drift_ref_captured_ = false;
+    double total_path_ = 0.0;
+    V3D last_drift_position_ = V3D::Zero();
 
     // 视觉直接法前端（仅 LIVO 模式启用）
     VIOManager vio_manager_;
