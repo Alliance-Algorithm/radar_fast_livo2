@@ -37,6 +37,19 @@ public:
     [[nodiscard]] auto take_nearest(double target_time, double tolerance_sec)
         -> std::optional<CameraFrame>;
 
+    /// Return the oldest queued frame timestamp without consuming it.
+    auto oldest_timestamp() const -> std::optional<double>;
+
+    /// Return the queued timestamp nearest to `target_time` without consuming it.
+    auto nearest_timestamp(double target_time) const -> std::optional<double>;
+
+    /// Consume the oldest queued frame.  This is used by the image-driven
+    /// LIVO synchronizer after it has processed the frame at its capture time.
+    auto take_oldest() -> std::optional<CameraFrame>;
+
+    /// Change the bounded capacity while preserving the newest frames.
+    void set_max_size(size_t max_size);
+
     [[nodiscard]] auto empty() const -> bool;
     [[nodiscard]] auto size() const -> size_t;
     [[nodiscard]] auto max_size() const noexcept -> size_t { return max_size_; }

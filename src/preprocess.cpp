@@ -97,17 +97,19 @@ void Preprocess::odin1_handler(
         std::memcpy(&offset_time, base + off_offset_time, sizeof(offset_time));
 
         // 4. 转换到统一 PointType
-        // FIXME: Odin1 dToF 是全局曝光面阵传感器（同 L515），所有像素同时曝光，
-        // 不存在逐点扫描时间差。驱动层虚构的 offset_time（group/ODR，量纲是
-        // rate 不是时间）不能用于运动去畸变——用了等价于把旋转向量乘了一个随机
-        // 幅值，运动中点云被"拧成麻花"，导致 zero feature。
-        // 正确做法与 L515 路径（preprocess.cpp:129）一致：curvature = 0。
+        // Odin's cloud_raw.offset_time is a real per-row-group offset in
+        // seconds.  The driver exposes about 0..94 ms at 10 Hz, so preserve
+        // it in FAST-LIVO2's curvature field, whose convention is milliseconds.
+        // Dropping this field makes the frame end time wrong and prevents the
+        // IMU propagation/point compensation window from covering the frame.
         PointType pt;
         pt.x         = x;
         pt.y         = y;
         pt.z         = z;
         pt.intensity = static_cast<float>(intensity);
-        pt.curvature = 0.0f; // 全局曝光面阵，无帧内时间偏移（同 L515 路径）
+        pt.curvature = (std::isfinite(offset_time) && offset_time >= 0.0f)
+            ? offset_time * 1000.0f
+            : 0.0f;
         out->push_back(pt);
     }
 

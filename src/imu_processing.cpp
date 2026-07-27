@@ -140,14 +140,11 @@ bool ImuProcess::process(MeasureGroup& meas, StatesGroup& state, PointCloudT::Pt
 // vel/pos 保持 StatesGroup 默认构造的零值，与原版一致（原版 IMU_init 同样
 // 不触碰 bias_a/vel_end/pos_end，只设 gravity/rot_end/bias_g）。
 //
-// HACK: 区别：FAST-LIVO2 按 IMU 样本计数（bug：单帧 40 个样本即 > MAX_INI_COUNT=20），
-//       本实现按 Lidar 帧计数（init_imu_num_ = 20 帧，约 2 秒@10Hz），
-//       语义上是等待足够帧数以确保静止初始化的统计可靠性。
-
 void ImuProcess::imu_init(const MeasureGroup& meas, StatesGroup& state) {
     if (is_first_frame_) {
         init_count_     = 0;
         is_first_frame_ = false;
+        M2_acc_ = M2_gyr_ = Eigen::Vector3d::Zero();
         if (!meas.imu.empty()) {
             mean_acc_ = meas.imu.front().acc;
             mean_gyr_ = meas.imu.front().gyro;
@@ -158,24 +155,30 @@ void ImuProcess::imu_init(const MeasureGroup& meas, StatesGroup& state) {
         }
     }
 
-    // 跨帧 running mean（Welford 在线均值更新）
+    // 跨帧 running mean + Welford 在线方差（对齐 SPARK-FAST-LIO）
     for (size_t i = 0; i < meas.imu.size(); ++i) {
         const auto& imu = meas.imu[i];
         init_count_++;
+        Eigen::Vector3d prev_mean_acc = mean_acc_;
+        Eigen::Vector3d prev_mean_gyr = mean_gyr_;
         mean_acc_ += (imu.acc - mean_acc_) / static_cast<double>(init_count_);
         mean_gyr_ += (imu.gyro - mean_gyr_) / static_cast<double>(init_count_);
+        // Welford M2 update: M2_{n} = M2_{n-1} + (x_n - mean_{n-1}) * (x_n - mean_n)
+        if (init_count_ > 1) {
+            M2_acc_ += (imu.acc - prev_mean_acc).cwiseProduct(imu.acc - mean_acc_);
+            M2_gyr_ += (imu.gyro - prev_mean_gyr).cwiseProduct(imu.gyro - mean_gyr_);
+        }
     }
 
     mean_acc_norm_ = mean_acc_.norm();
 
     RCLCPP_INFO_THROTTLE(rclcpp::get_logger("radar_fast_livo2_node"), throttle_clock_, 2000,
-        "IMU initializing... %d IMU samples over %d frames (keep device still)", init_count_,
-        init_count_ > 0 ? 1 + init_count_ / 40 : 0);
+        "IMU initializing... %d/%d samples (keep device still)", init_count_, init_imu_num);
 
-    const int target_count = init_imu_num * 40; // 40 ≈ 典型每帧 IMU 样本数 @400Hz
+    const int target_count = std::max(1, init_imu_num);
 
     if (init_count_ >= target_count) {
-        // 重力方向估计，直接写入调用方持有的 ESIKF 状态
+        // 重力方向估计
         state.gravity  = -mean_acc_ / mean_acc_norm_ * G_M_S2;
         state.rot_end  = Eigen::Matrix3d::Identity();
         state.bias_g   = Eigen::Vector3d::Zero();
@@ -184,13 +187,32 @@ void ImuProcess::imu_init(const MeasureGroup& meas, StatesGroup& state) {
         state.pos_end  = Eigen::Vector3d::Zero();
         imu_need_init_ = false;
 
+        // Online covariance estimation (SPARK-FAST-LIO): use sample variance
+        // from static initialization period to refine noise parameters.
+        const double N = static_cast<double>(init_count_);
+        if (N > 1) {
+            Eigen::Vector3d var_acc = M2_acc_ / (N - 1);
+            Eigen::Vector3d var_gyr = M2_gyr_ / (N - 1);
+            // Clamp: don't go below 1% or above 100x of configured values
+            // to guard against pathological estimates.
+            for (int d = 0; d < 3; d++) {
+                var_acc[d] = std::clamp(var_acc[d], acc_cov_[d] * 0.01, acc_cov_[d] * 100.0);
+                var_gyr[d] = std::clamp(var_gyr[d], gyr_cov_[d] * 0.01, gyr_cov_[d] * 100.0);
+            }
+            // Blend 50/50 with config values to avoid over-fitting to a single
+            // static period (which may not represent in-motion noise).
+            acc_cov_ = (acc_cov_ + var_acc) * 0.5;
+            gyr_cov_ = (gyr_cov_ + var_gyr) * 0.5;
+        }
+
         RCLCPP_INFO(rclcpp::get_logger("radar_fast_livo2_node"),
             "IMU initialization done.\n"
             "  Gravity:  [%.4f %.4f %.4f]  norm=%.4f\n"
-            "  Acc cov:  [%.6f %.6f %.6f]\n"
-            "  Gyro cov: [%.6f %.6f %.6f]",
-            state.gravity.x(), state.gravity.y(), state.gravity.z(), mean_acc_norm_, acc_cov_.x(),
-            acc_cov_.y(), acc_cov_.z(), gyr_cov_.x(), gyr_cov_.y(), gyr_cov_.z());
+            "  Acc cov (online):  [%.6f %.6f %.6f]\n"
+            "  Gyro cov (online): [%.6f %.6f %.6f]",
+            state.gravity.x(), state.gravity.y(), state.gravity.z(), mean_acc_norm_,
+            acc_cov_.x(), acc_cov_.y(), acc_cov_.z(),
+            gyr_cov_.x(), gyr_cov_.y(), gyr_cov_.z());
     }
 }
 
@@ -241,11 +263,15 @@ void ImuProcess::undistort_pcl(
     pcl_wait_proc_.resize(meas.lidar->points.size());
     pcl_wait_proc_ = *(meas.lidar);
 
-    // 初始化 IMU 位姿队列：首元素为上一帧末尾状态（来自调用方状态）
+    // 初始化 IMU 位姿队列：首元素为上一帧末尾状态（来自调用方状态）。
+    // Pose6D 的 offset_time 必须与点云 curvature 使用同一原点：当前
+    // LiDAR 帧起点。传播本身仍从 last_prop_end_time_ 开始，因此首个
+    // Pose6D 通常具有一个小的负时间偏移（帧起点之前的上一帧末状态）。
     imu_pose_.clear();
     imu_pose_.push_back({ });
-    set_pose6d(imu_pose_.back(), 0.0, acc_s_last_, angvel_last_, state.vel_end, state.pos_end,
-        state.rot_end);
+    const double point_time_origin = meas.lidar_beg_time;
+    set_pose6d(imu_pose_.back(), prop_beg_time - point_time_origin, acc_s_last_, angvel_last_,
+        state.vel_end, state.pos_end, state.rot_end);
 
     // ── 3. 正向传播：在每个 IMU 时间点积分状态与协方差 ──
     Eigen::Vector3d acc_imu    = acc_s_last_;
@@ -277,17 +303,29 @@ void ImuProcess::undistort_pcl(
         double dt     = 0.0;
         double offs_t = 0.0;
 
-        const double effective_end = std::min(tail.timestamp, prop_end_time);
-        bool past_end              = (tail.timestamp >= prop_end_time);
+        // Match FAST-LIVO2's final propagation interval: when the last
+        // available IMU sample is still before the requested frame end, use
+        // the last measured rate/acceleration to reach that end time instead
+        // of silently leaving a gap in the state timeline.
+        const bool last_pair = (i + 1 == v_imu.size() - 1);
+        const bool extrapolate_to_end = last_pair && tail.timestamp < prop_end_time;
+        const double effective_end = extrapolate_to_end
+            ? prop_end_time
+            : std::min(tail.timestamp, prop_end_time);
+        const bool past_end = extrapolate_to_end || tail.timestamp >= prop_end_time;
+
+        if (head.timestamp >= prop_end_time || effective_end <= prop_beg_time) {
+            break;
+        }
 
         if (head.timestamp < prop_beg_time) {
             // 跨传播边界的首个部分 IMU 区间
             dt     = effective_end - last_prop_end_time_;
-            offs_t = effective_end - prop_beg_time;
+            offs_t = effective_end - point_time_origin;
         } else {
             // 帧内 IMU 区间（含跨帧末截断）
             dt     = effective_end - head.timestamp;
-            offs_t = effective_end - prop_beg_time;
+            offs_t = effective_end - point_time_origin;
         }
 
         // ── 协方差传播：F_x * P * F_x^T + cov_w（Oracle C2）──

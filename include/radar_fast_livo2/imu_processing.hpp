@@ -52,6 +52,7 @@ public:
     // 可安全丢弃。比固定 wall-clock 窗口更贴近上游"处理完就 pop"的语义,
     // 也避免处理卡顿超过固定窗口时误删尚未消费的 IMU 数据。
     double last_prop_end_time() const { return last_prop_end_time_; }
+    double mean_acc_norm() const { return mean_acc_norm_; }
 
     bool imu_en        = true;
     int init_imu_num   = 400;  // 静止初始化需要的 IMU 样本数
@@ -74,6 +75,8 @@ private:
 
     Eigen::Vector3d mean_acc_    = Eigen::Vector3d(0, 0, -1.0);
     Eigen::Vector3d mean_gyr_    = Eigen::Vector3d::Zero();
+    Eigen::Vector3d M2_acc_      = Eigen::Vector3d::Zero(); // Welford M2 for acc variance
+    Eigen::Vector3d M2_gyr_      = Eigen::Vector3d::Zero(); // Welford M2 for gyro variance
     Eigen::Vector3d angvel_last_ = Eigen::Vector3d::Zero();
     Eigen::Vector3d acc_s_last_  = Eigen::Vector3d::Zero();
     double mean_acc_norm_        = 9.81;

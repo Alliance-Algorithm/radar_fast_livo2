@@ -65,6 +65,7 @@
 
 #include "radar_fast_livo2/lio_drift_diagnostics.hpp"
 #include "radar_fast_livo2/voxel_map.hpp"
+#include "radar_fast_livo2/gtsam_backend.hpp"
 
 namespace radar::fast_livo2 {
 
@@ -152,6 +153,11 @@ private:
         // 详见 config/odin_livo2.yaml 内说明，通常不需要调整。
         declare_parameter("imu_time_offset", 0.0);
         declare_parameter("img_time_offset", 0.0);
+
+        // Gravity alignment (SPARK-FAST-LIO): correct roll/pitch drift after
+        // a stationary period. Threshold is |acc_norm - 9.81| in m/s².
+        declare_parameter("gravity_alignment_en", true);
+        declare_parameter("gravity_acc_thresh", 0.3);
 
         // Extrinsics: LiDAR w.r.t. IMU
         declare_parameter("extrinsic_T", std::vector<double> { 0.0, 0.0, 0.0 });
@@ -266,6 +272,10 @@ private:
         img_time_offset_ = get_parameter("img_time_offset").as_double();
         imu_time_offset_ = get_parameter("imu_time_offset").as_double();
         img_scale_       = get_parameter("img_scale").as_double();
+        gravity_acc_thresh_ = get_parameter("gravity_acc_thresh").as_double();
+        if (!get_parameter("gravity_alignment_en").as_bool()) {
+            imu_process_.disable_gravity_est();
+        }
 
         camera_queue_size_ = static_cast<size_t>(std::max<int64_t>(
             1, get_parameter("camera/queue_size").as_int()));
@@ -508,6 +518,7 @@ private:
     void init_publishers() {
         pub_odom_  = create_publisher<nav_msgs::msg::Odometry>("/fast_livo2/odom", 10);
         pub_cloud_ = create_publisher<sensor_msgs::msg::PointCloud2>("/fast_livo2/cloud_world", 10);
+        pub_cloud_lidar_ = create_publisher<sensor_msgs::msg::PointCloud2>("/fast_livo2/cloud_lidar", 10);
         pub_path_  = create_publisher<nav_msgs::msg::Path>("/fast_livo2/path", 10);
         tf_broadcaster_ = std::make_unique<tf2_ros::TransformBroadcaster>(*this);
     }
@@ -750,6 +761,15 @@ private:
             return;
         }
 
+        // Publish undistorted LiDAR-frame cloud for downstream consumers (KISS-Matcher etc.)
+        {
+            sensor_msgs::msg::PointCloud2 lidar_cloud_msg;
+            pcl::toROSMsg(*feats_undistort, lidar_cloud_msg);
+            lidar_cloud_msg.header.stamp = rclcpp::Time(static_cast<int64_t>(std::llround(frame_end * 1e9)));
+            lidar_cloud_msg.header.frame_id = "odin1_base_link";
+            pub_cloud_lidar_->publish(lidar_cloud_msg);
+        }
+
         // ── 5. 降采样 ──
         // HACK: 手动体素降采样，避免 pcl::VoxelGrid 内部 malloc 与
         // Eigen::aligned_allocator::deallocate 的 ABI 冲突。
@@ -808,6 +828,73 @@ private:
         voxel_map_.state_ = state_propagat;
         voxel_map_.StateEstimation(state_propagat);
         state_ = voxel_map_.state_;
+
+        // ── 8.5. 重力对齐恢复 (SPARK-FAST-LIO inspired) ──
+        // When stationary, accumulate gravity direction in world frame.
+        // On motion onset, compute rotation to re-align roll/pitch — useful
+        // for recovery after occlusion-induced drift.
+        if (imu_process_.gravity_align && lidar_map_inited_) {
+            const double acc_norm = (imu_process_.mean_acc_norm() > 1e-6)
+                ? imu_process_.mean_acc_norm() : 9.81;
+            const double acc_std = std::abs(acc_norm - 9.81);
+
+            if (acc_std < gravity_acc_thresh_ && feats_down_size > 500) {
+                // Stationary: accumulate world-frame gravity direction
+                const V3D grav_world = state_.gravity;
+                if (!gravity_is_stationary_) {
+                    gravity_stationary_acc_ = Eigen::Vector3d::Zero();
+                    gravity_stationary_count_ = 0;
+                }
+                gravity_stationary_acc_ += grav_world;
+                gravity_stationary_count_++;
+                gravity_is_stationary_ = true;
+            } else if (gravity_is_stationary_ && gravity_stationary_count_ > 0) {
+                // Motion onset after stationary period:
+                // compute rotation aligning estimated gravity → expected gravity
+                const V3D avg_grav = gravity_stationary_acc_ / gravity_stationary_count_;
+                const V3D expected_grav(0.0, 0.0, -9.81);
+                const V3D axis = avg_grav.cross(expected_grav);
+                const double axis_norm = axis.norm();
+                if (axis_norm > 1e-6) {
+                    const double angle = std::acos(
+                        std::clamp(avg_grav.dot(expected_grav)
+                            / (avg_grav.norm() * expected_grav.norm()), -1.0, 1.0));
+                    const V3D u = axis / axis_norm;
+                    const double ca = std::cos(angle), sa = std::sin(angle);
+                    Eigen::Matrix3d R_align;
+                    R_align <<
+                        ca + u.x()*u.x()*(1-ca), u.x()*u.y()*(1-ca) - u.z()*sa, u.x()*u.z()*(1-ca) + u.y()*sa,
+                        u.y()*u.x()*(1-ca) + u.z()*sa, ca + u.y()*u.y()*(1-ca), u.y()*u.z()*(1-ca) - u.x()*sa,
+                        u.z()*u.x()*(1-ca) - u.y()*sa, u.z()*u.y()*(1-ca) + u.x()*sa, ca + u.z()*u.z()*(1-ca);
+                    state_.rot_end = R_align * state_.rot_end;
+                    RCLCPP_INFO_THROTTLE(get_logger(), *get_clock(), 5000,
+                        "Gravity alignment: %.1fdeg correction (%.0f stationary frames)",
+                        angle * 180.0 / M_PI, static_cast<double>(gravity_stationary_count_));
+                }
+                gravity_is_stationary_ = false;
+            }
+            if (!gravity_is_stationary_) {
+                gravity_is_stationary_ = false;
+            }
+        }
+
+        // ── 8.6. GTSAM Loop Closure Backend ──
+        if (gtsam_enabled_) {
+            const Eigen::Quaterniond q(state_.rot_end);
+            gtsam::Pose3 pose(gtsam::Rot3::Quaternion(q.w(), q.x(), q.y(), q.z()),
+                              gtsam::Point3(state_.pos_end.x(), state_.pos_end.y(), state_.pos_end.z()));
+            bool is_kf = gtsam_backend_.add_odometry(pose, frame_end);
+            if (is_kf) {
+                gtsam_backend_.try_loop_closure(pose, gtsam_backend_.latest_idx());
+                gtsam::Pose3 corrected = gtsam_backend_.optimize();
+                if (gtsam_backend_.num_loops() > 0 && gtsam_backend_.latest_idx() % 50 == 0) {
+                    RCLCPP_INFO_THROTTLE(get_logger(), *get_clock(), 10000,
+                        "[GTSAM] kf=%d loops=%d edges=%d | drift corrected",
+                        gtsam_backend_.latest_idx(), gtsam_backend_.num_loops(),
+                        gtsam_backend_.num_edges());
+                }
+            }
+        }
 
         auto t2 = clock::now();
 
@@ -1131,6 +1218,17 @@ private:
     double total_path_ = 0.0;
     V3D last_drift_position_ = V3D::Zero();
 
+    // Gravity alignment
+    double gravity_acc_thresh_ = 0.3;
+    bool gravity_is_stationary_ = false;
+    V3D gravity_stationary_acc_{0, 0, 0};
+    int gravity_stationary_count_ = 0;
+
+    // GTSAM loop closure backend
+    GtsamBackend::Config gtsam_cfg_{};
+    GtsamBackend gtsam_backend_{gtsam_cfg_};
+    bool gtsam_enabled_ = true;
+
     // 视觉直接法前端（仅 LIVO 模式启用）
     VIOManager vio_manager_;
 
@@ -1139,6 +1237,7 @@ private:
     rclcpp::Subscription<sensor_msgs::msg::Imu>::SharedPtr sub_imu_;
     rclcpp::Publisher<nav_msgs::msg::Odometry>::SharedPtr pub_odom_;
     rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr pub_cloud_;
+    rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr pub_cloud_lidar_;
     rclcpp::Publisher<nav_msgs::msg::Path>::SharedPtr pub_path_;
     std::unique_ptr<tf2_ros::TransformBroadcaster> tf_broadcaster_;
     nav_msgs::msg::Path path_msg_;
