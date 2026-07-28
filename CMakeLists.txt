@@ -38,7 +38,7 @@ find_package(hikcamera REQUIRED)
 ament_auto_find_build_dependencies()
 
 # ── Core library (传感器适配 + 算法核心) ───────────────────────────
-# 包含 FAST-LIVO2 的 VoxelMapManager（已 vendor 到 src/voxel_map.cpp）
+# 不包含 GTSAM 回环代码——回环是独立节点，与 LIO 完全解耦
 add_library(${PROJECT_NAME}_core STATIC
     src/preprocess.cpp
     src/imu_processing.cpp
@@ -46,6 +46,7 @@ add_library(${PROJECT_NAME}_core STATIC
     src/vio.cpp
     src/shm_camera.cpp
     src/camera_frame_queue.cpp
+    src/ros_image_camera.cpp
 )
 ament_target_dependencies(${PROJECT_NAME}_core
     rclcpp
@@ -82,6 +83,18 @@ if(BUILD_TESTING)
     # ── ShmCamera unit tests ─────────────────────────────────────
     ament_add_gtest(test_shm_camera test/test_shm_camera.cpp)
     target_link_libraries(test_shm_camera ${PROJECT_NAME}_core)
+
+    # ── RosImageCamera unit tests ────────────────────────────────
+    ament_add_gtest(test_ros_image_camera test/test_ros_image_camera.cpp)
+    target_link_libraries(test_ros_image_camera ${PROJECT_NAME}_core)
+
+    # ── LIO drift diagnostics unit tests ────────────────────────
+    ament_add_gtest(test_lio_drift_diagnostics test/test_lio_drift_diagnostics.cpp)
+    target_link_libraries(test_lio_drift_diagnostics ${PROJECT_NAME}_core)
+
+    ament_add_gtest(test_lie test/test_lie.cpp)
+    target_include_directories(test_lie PRIVATE include)
+    target_link_libraries(test_lie Eigen3::Eigen)
 endif()
 
 install(TARGETS ${PROJECT_NAME}_node DESTINATION lib/${PROJECT_NAME})

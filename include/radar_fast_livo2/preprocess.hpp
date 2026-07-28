@@ -24,6 +24,7 @@ public:
     float blind                   = 0.1f;  // 最近有效距离 (m)
     float max_range               = 30.0f; // 最远有效距离 (m)
     uint16_t confidence_threshold = 35;    // Odin1 专用：置信度阈值
+    double point_time_scale       = 1000.0; // seconds in PointCloud2 -> curvature milliseconds
 
 private:
     // ── 各传感器处理函数 ─────────────────────────────────────────
