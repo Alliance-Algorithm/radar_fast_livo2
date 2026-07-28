@@ -39,7 +39,7 @@ find_package(GTSAM REQUIRED)
 ament_auto_find_build_dependencies()
 
 # ── Core library (传感器适配 + 算法核心) ───────────────────────────
-# 包含 FAST-LIVO2 的 VoxelMapManager（已 vendor 到 src/voxel_map.cpp）
+# 不包含 GTSAM 回环代码——回环是独立节点，与 LIO 完全解耦
 add_library(${PROJECT_NAME}_core STATIC
     src/preprocess.cpp
     src/imu_processing.cpp
@@ -48,7 +48,6 @@ add_library(${PROJECT_NAME}_core STATIC
     src/shm_camera.cpp
     src/camera_frame_queue.cpp
     src/ros_image_camera.cpp
-    src/gtsam_backend.cpp
 )
 ament_target_dependencies(${PROJECT_NAME}_core
     rclcpp
@@ -63,7 +62,6 @@ target_link_libraries(${PROJECT_NAME}_core
     Eigen3::Eigen
     OpenMP::OpenMP_CXX
     hikcamera::hikcamera
-    gtsam
 )
 target_include_directories(${PROJECT_NAME}_core PUBLIC
     include
@@ -77,10 +75,17 @@ ament_auto_add_executable(${PROJECT_NAME}_node
 target_link_libraries(${PROJECT_NAME}_node ${PROJECT_NAME}_core)
 
 # ── GTSAM loop closure backend (standalone, decoupled from LIO) ──
+# Separate library + node: LIO does NOT link GTSAM.
+add_library(gtsam_backend_lib STATIC
+    src/gtsam_backend.cpp
+)
+target_link_libraries(gtsam_backend_lib gtsam)
+target_include_directories(gtsam_backend_lib PUBLIC include)
+
 ament_auto_add_executable(gtsam_backend_node
     src/gtsam_backend_node.cpp
 )
-target_link_libraries(gtsam_backend_node ${PROJECT_NAME}_core)
+target_link_libraries(gtsam_backend_node gtsam_backend_lib)
 
 if(BUILD_TESTING)
     find_package(ament_cmake_gtest REQUIRED)

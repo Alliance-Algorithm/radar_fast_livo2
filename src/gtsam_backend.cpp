@@ -71,7 +71,12 @@ int GtsamBackend::try_loop_closure(const gtsam::Pose3& pose, int kf_idx) {
         if (kf_idx - candidate_idx < cfg_.loop_min_skip) continue;
         double dist = point_distance(pose.translation(), candidate_pose.translation());
         if (dist < cfg_.loop_radius) {
-            // Loop closure: ~0.3m drift @30m path, 0.3m std matches expectation
+            // Validate: heading must agree within ~60° to avoid false positive
+            // from crossing paths (same location, opposite direction)
+            double ang = pose.rotation().localCoordinates(
+                candidate_pose.rotation()).norm();
+            if (ang > M_PI / 3.0) continue;  // >60° heading diff → skip
+
             auto loop_noise = gtsam::noiseModel::Diagonal::Sigmas(
                 (gtsam::Vector(6) << 5e-2, 5e-2, 5e-2, 0.3, 0.3, 0.3).finished());
             graph_.add(gtsam::BetweenFactor<gtsam::Pose3>(
