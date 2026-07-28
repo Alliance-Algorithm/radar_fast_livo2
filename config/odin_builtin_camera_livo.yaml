@@ -1,0 +1,105 @@
+# FAST-LIVO2 with Odin1's built-in RGB camera.
+#
+# The image input is Odin's device-undistorted ROS image. The official Odin
+# driver decodes the JPEG payload with cv::IMREAD_COLOR and publishes bgr8.
+# radar_fast_livo2 converts that BGR8 image to grayscale once because the
+# direct VIO frontend consumes CV_8UC1. The RGB colorizer subscribes to the
+# original BGR8 topic separately and keeps its color bytes.
+#
+# Do not switch this Odin configuration to direct Hik SHM mode: that mode
+# reads the SDK's already-converted RGB8_Packed buffer and is a separate input
+# path. It must not be mixed with Odin's ROS image stream.
+#
+# Odin's Tcl_0 is
+# T_camera_lidar (p_camera = Tcl_0 * p_lidar), which is also the Rcl/Pcl
+# convention used by VIOManager.
+    # Odin1 defines T_imu_lidar as p_imu = T_imu_lidar * p_lidar. The official
+    # fixed transform is a unit rotation with the following translation.
+radar_fast_livo2_node:
+  ros__parameters:
+    lidar_topic: "/odin1/cloud_raw"
+    imu_topic: "/odin1/imu"
+
+    slam_mode: 1
+    img_en: false
+    camera_input_mode: "ros_image"
+    camera/image_topic: "/odin1/image/undistorted"
+    camera/sync_tolerance_sec: 0.12
+    camera/match_time_ref: "frame_beg"
+    camera/match_time_offset_sec: 0.0
+    camera/queue_size: 30
+    camera/sync_diag_en: true
+
+    # Odin device timestamps are used by the driver for all three streams.
+    imu_time_offset: 0.0
+    # Camera frame arrives ~96ms after LiDAR frame start (measured via VIO sync diag).
+    # Negative offset subtracts from image timestamp to align with LiDAR frame_beg.
+    img_time_offset: -0.096
+
+    lidar_type: 5
+    point_filter_num: 1        # 全量 35-41K 点，快转时需要更多约束
+    blind: 0.1
+    max_range: 30.0
+    confidence_threshold: 25   # 保持默认，快转时不过滤
+
+    imu_en: true
+    # FAST-LIVO2 counts individual IMU samples during static initialization.
+    # Odin1 publishes at about 400 Hz; 400 samples provide roughly one second
+    # of stationary averaging without changing the estimator itself.
+    init_imu_num: 400
+    gyr_cov: 0.01
+    acc_cov: 0.005             # 回退：0.003 过紧，快转时制约太大
+    gyr_bias_cov: 0.1
+    acc_bias_cov: 0.1
+
+    # Odin1 official T_imu_lidar, p_imu = R_il * p_lidar + t_il.
+    extrinsic_T: [-0.02663, 0.03447, 0.02174]
+    extrinsic_R: [1.0, 0.0, 0.0,
+                  0.0, 1.0, 0.0,
+                  0.0, 0.0, 1.0]
+    extrinsic_est_en: false
+
+    # Camera-LiDAR extrinsics: T_camera_lidar = Tcl_0 from calib.yaml.
+    # p_camera = R * p_lidar + t. VIOManager expects this exact convention.
+    # Source: image/cam_in_ex.txt (device-specific, exported via .script/odin-get-extrinsic)
+    Pcl: [0.03205, -0.00622, -0.00897]              # t_camera_lidar (m)
+    Rcl: [0.000190, -1.000000, 0.000730,              # R_camera_lidar
+         -0.002500, -0.000730, -1.000000,
+          1.000000,  0.000180, -0.002500]
+
+    # Camera intrinsics (pinhole after Odin1 FishPoly undistortion).
+    # FishPoly A11≈fx, A22≈fy, u0=cx, v0=cy.  LIVO uses half resolution.
+    # Source: image/cam_in_ex.txt
+    cam_fx: 367.62          # A11/2 = 735.25/2
+    cam_fy: 367.58          # A22/2 = 735.16/2
+    cam_cx: 400.53          # u0/2  = 801.05/2
+    cam_cy: 306.05          # v0/2  = 612.11/2
+    cam_width: 800           # 1600/2
+    cam_height: 648          # 1296/2
+    img_scale: 0.5
+
+    patch_size: 8
+    patch_pyramid_level: 4
+
+    filter_size_surf: 0.15
+    filter_size_map: 0.1
+    cube_side_length: 1000.0
+
+    voxel_map/max_layer: 2
+    voxel_map/voxel_size: 0.5
+    voxel_map/min_eigen_value: 0.01
+    voxel_map/layer_init_num: [3, 5, 5, 5, 5]
+    voxel_map/sigma_num: 4.5    # 放宽接受阈值，快转时保留更多特征约束
+    voxel_map/beam_err: 0.02
+    voxel_map/dept_err: 0.05
+    voxel_map/max_points_num: 50
+    voxel_map/max_iterations: 5
+    voxel_map/map_sliding_en: true
+    voxel_map/half_map_size: 100
+    voxel_map/sliding_thresh: 8.0
+
+    pcd_save_en: true
+    pcd_save_interval: 500      # 每500帧(~50s)刷盘防OOM
+    map_save_path: "/workspace/model/generated/lio_map.pcd"
+    map_save_trigger: "/tmp/fast_livo2_builtin_camera_save_map"
+    pcd_save_warmup_frames: 30
