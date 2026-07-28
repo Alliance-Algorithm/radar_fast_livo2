@@ -30,8 +30,8 @@ auto RosImageCamera::convert(const sensor_msgs::msg::Image& image, int target_wi
 
     // ── 4. Wrap raw BGR8 data as cv::Mat (no copy) ────────────────
     // const_cast is safe: cvtColor only reads from source.
-    cv::Mat bgr(image.height, image.width, CV_8UC3,
-        const_cast<uint8_t*>(image.data.data()), image.step);
+    cv::Mat bgr(
+        image.height, image.width, CV_8UC3, const_cast<uint8_t*>(image.data.data()), image.step);
 
     // ── 5. BGR → gray at source resolution ────────────────────────
     cv::Mat gray;
@@ -65,8 +65,8 @@ auto RosImageCamera::convert(const sensor_msgs::msg::Image& image, int target_wi
 
 void RosImageCamera::validate_topic_not_empty(const std::string& mode, const std::string& topic) {
     if (mode == "ros_image" && topic.empty()) {
-        throw std::invalid_argument(
-            "camera/image_topic must be set (non-empty) when camera_input_mode is 'ros_image'");
+        throw std::invalid_argument("camera/image_topic must be set (non-empty) when "
+                                    "camera_input_mode is 'ros_image'");
     }
 }
 

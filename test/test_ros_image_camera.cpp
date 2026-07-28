@@ -22,7 +22,7 @@ using namespace radar::fast_livo2;
 // ══════════════════════════════════════════════════════════════════
 
 TEST(RosImageCamera, ConvertsBgr8AndUsesHeaderStampWithoutOffset) {
-    auto image = sensor_msgs::msg::Image();
+    auto image                 = sensor_msgs::msg::Image();
     image.header.stamp.sec     = 12;
     image.header.stamp.nanosec = 345000000;
     image.encoding             = "bgr8";
@@ -48,7 +48,7 @@ TEST(RosImageCamera, RejectsNonBgr8Image) {
 TEST(RosImageCamera, GrayscaleValuesMatchCvtColor) {
     // 2×2 BGR8: Red=255, Green=255, Blue=255, White=255
     // BGR2GRAY = 0.114*B + 0.587*G + 0.299*R
-    auto image = sensor_msgs::msg::Image();
+    auto image                 = sensor_msgs::msg::Image();
     image.header.stamp.sec     = 1;
     image.header.stamp.nanosec = 0;
     image.encoding             = "bgr8";
@@ -69,12 +69,12 @@ TEST(RosImageCamera, GrayscaleValuesMatchCvtColor) {
     EXPECT_EQ(frame->gray.at<uint8_t>(0, 1),
         static_cast<uint8_t>(0.587 * 255 + 0.5)); // Green → gray
     EXPECT_EQ(frame->gray.at<uint8_t>(1, 0),
-        static_cast<uint8_t>(0.114 * 255 + 0.5)); // Blue → gray
+        static_cast<uint8_t>(0.114 * 255 + 0.5));  // Blue → gray
     EXPECT_EQ(frame->gray.at<uint8_t>(1, 1), 255); // White
 }
 
 TEST(RosImageCamera, SequenceIsMonotonicallyAssigned) {
-    auto image = sensor_msgs::msg::Image();
+    auto image     = sensor_msgs::msg::Image();
     image.encoding = "bgr8";
     image.width    = 1;
     image.height   = 1;
@@ -94,7 +94,7 @@ TEST(RosImageCamera, SequenceIsMonotonicallyAssigned) {
 }
 
 TEST(RosImageCamera, ResizeToTargetResolution) {
-    auto image = sensor_msgs::msg::Image();
+    auto image     = sensor_msgs::msg::Image();
     image.encoding = "bgr8";
     image.width    = 4;
     image.height   = 4;
@@ -121,7 +121,7 @@ TEST(RosImageCamera, EmptyImageDataReturnsNullopt) {
 }
 
 TEST(RosImageCamera, ZeroTargetDimensionsReturnNullopt) {
-    auto image = sensor_msgs::msg::Image();
+    auto image     = sensor_msgs::msg::Image();
     image.encoding = "bgr8";
     image.width    = 10;
     image.height   = 10;
@@ -139,10 +139,7 @@ TEST(RosImageCamera, ZeroTargetDimensionsReturnNullopt) {
 
 TEST(RosImageCameraValidateTopic, ThrowsForRosImageModeWithEmptyTopic) {
     EXPECT_THROW(
-        {
-            RosImageCamera::validate_topic_not_empty("ros_image", "");
-        },
-        std::invalid_argument);
+        { RosImageCamera::validate_topic_not_empty("ros_image", ""); }, std::invalid_argument);
 }
 
 TEST(RosImageCameraValidateTopic, NoThrowForRosImageModeWithNonEmptyTopic) {

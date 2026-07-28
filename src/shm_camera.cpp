@@ -41,29 +41,31 @@ namespace radar::fast_livo2 {
 
 namespace {
 
-/// Completed slot protocol: the writer increments write_index BEFORE
-/// writing data but release-stores frame_counter AFTER data+timestamp
-/// are complete.  After observing counter N (N>0), slot (N-1)%SLOT_NUM
-/// is guaranteed to hold a fully-written frame.
-[[nodiscard]] inline auto completed_slot(uint64_t counter, unsigned int slot_num) -> unsigned int {
-    return static_cast<unsigned int>((counter - 1) % static_cast<uint64_t>(slot_num));
-}
+    /// Completed slot protocol: the writer increments write_index BEFORE
+    /// writing data but release-stores frame_counter AFTER data+timestamp
+    /// are complete.  After observing counter N (N>0), slot (N-1)%SLOT_NUM
+    /// is guaranteed to hold a fully-written frame.
+    [[nodiscard]] inline auto completed_slot(uint64_t counter, unsigned int slot_num)
+        -> unsigned int {
+        return static_cast<unsigned int>((counter - 1) % static_cast<uint64_t>(slot_num));
+    }
 
-[[nodiscard]] inline auto is_valid_counter(uint64_t counter) -> bool { return counter > 0; }
+    [[nodiscard]] inline auto is_valid_counter(uint64_t counter) -> bool { return counter > 0; }
 
-[[nodiscard]] inline auto is_stable(uint64_t before, uint64_t after) -> bool {
-    return before == after;
-}
+    [[nodiscard]] inline auto is_stable(uint64_t before, uint64_t after) -> bool {
+        return before == after;
+    }
 
-[[nodiscard]] inline auto has_advanced(uint64_t current, uint64_t last_seen) -> bool {
-    return current > 0 && current != last_seen;
-}
+    [[nodiscard]] inline auto has_advanced(uint64_t current, uint64_t last_seen) -> bool {
+        return current > 0 && current != last_seen;
+    }
 
-/// Convert steady_clock::time_point to nanoseconds since epoch.
-[[nodiscard]] inline auto to_nanos(const std::chrono::steady_clock::time_point& tp) -> uint64_t {
-    return static_cast<uint64_t>(
-        std::chrono::duration_cast<std::chrono::nanoseconds>(tp.time_since_epoch()).count());
-}
+    /// Convert steady_clock::time_point to nanoseconds since epoch.
+    [[nodiscard]] inline auto to_nanos(const std::chrono::steady_clock::time_point& tp)
+        -> uint64_t {
+        return static_cast<uint64_t>(
+            std::chrono::duration_cast<std::chrono::nanoseconds>(tp.time_since_epoch()).count());
+    }
 
 } // anonymous namespace
 
@@ -71,9 +73,8 @@ namespace {
 // Constructor / destructor
 // ══════════════════════════════════════════════════════════════════
 
-ShmCamera::ShmCamera(
-    std::string shm_name, int source_width, int source_height,
-    int target_width, int target_height, double img_time_offset)
+ShmCamera::ShmCamera(std::string shm_name, int source_width, int source_height, int target_width,
+    int target_height, double img_time_offset)
     : shm_name_(std::move(shm_name))
     , source_width_(source_width)
     , source_height_(source_height)
@@ -84,11 +85,11 @@ ShmCamera::ShmCamera(
 ShmCamera::~ShmCamera() {
     if (shm_ptr_ != nullptr) {
         std::ignore = hikcamera::SHMReleasePtr(shm_ptr_);
-        shm_ptr_ = nullptr;
+        shm_ptr_    = nullptr;
     }
     if (shm_fd_ != -1) {
         std::ignore = hikcamera::SHMClose(shm_fd_);
-        shm_fd_ = -1;
+        shm_fd_     = -1;
     }
     is_open_ = false;
 }
@@ -99,27 +100,27 @@ ShmCamera::~ShmCamera() {
 
 auto ShmCamera::open() -> std::expected<void, ShmCameraError> {
     if (source_width_ <= 0 || source_height_ <= 0) {
-        return std::unexpected { ShmCameraError { ShmCameraErrorCode::InvalidFrame,
-            "ShmCamera: source dimensions must be positive" } };
+        return std::unexpected { ShmCameraError {
+            ShmCameraErrorCode::InvalidFrame, "ShmCamera: source dimensions must be positive" } };
     }
     if (target_width_ <= 0 || target_height_ <= 0) {
-        return std::unexpected { ShmCameraError { ShmCameraErrorCode::InvalidFrame,
-            "ShmCamera: target dimensions must be positive" } };
+        return std::unexpected { ShmCameraError {
+            ShmCameraErrorCode::InvalidFrame, "ShmCamera: target dimensions must be positive" } };
     }
 
     // Validate source RGB image fits within MAX_IMAGE_SIZE
-    const auto w = static_cast<size_t>(source_width_);
-    const auto h = static_cast<size_t>(source_height_);
+    const auto w               = static_cast<size_t>(source_width_);
+    const auto h               = static_cast<size_t>(source_height_);
     constexpr size_t kChannels = 3;
-    const size_t pixels = w * h;
+    const size_t pixels        = w * h;
     if (h != 0 && pixels / h != w) {
-        return std::unexpected { ShmCameraError { ShmCameraErrorCode::InvalidFrame,
-            "ShmCamera: source width * height overflow" } };
+        return std::unexpected { ShmCameraError {
+            ShmCameraErrorCode::InvalidFrame, "ShmCamera: source width * height overflow" } };
     }
     image_bytes_ = pixels * kChannels;
     if (image_bytes_ / kChannels != pixels) {
-        return std::unexpected { ShmCameraError { ShmCameraErrorCode::InvalidFrame,
-            "ShmCamera: source width * height * 3 overflow" } };
+        return std::unexpected { ShmCameraError {
+            ShmCameraErrorCode::InvalidFrame, "ShmCamera: source width * height * 3 overflow" } };
     }
     if (image_bytes_ > MAX_IMAGE_SIZE) {
         return std::unexpected { ShmCameraError { ShmCameraErrorCode::InvalidFrame,
@@ -129,8 +130,7 @@ auto ShmCamera::open() -> std::expected<void, ShmCameraError> {
 
     auto fd_result = hikcamera::SHMInit(shm_name_, sizeof(hikcamera::imageSHM));
     if (!fd_result.has_value()) {
-        return std::unexpected { ShmCameraError {
-            ShmCameraErrorCode::ShmOpenFailed,
+        return std::unexpected { ShmCameraError { ShmCameraErrorCode::ShmOpenFailed,
             "ShmCamera: SHMInit('" + shm_name_ + "') failed: " + fd_result.error() } };
     }
     shm_fd_ = fd_result.value();
@@ -138,9 +138,8 @@ auto ShmCamera::open() -> std::expected<void, ShmCameraError> {
     auto ptr_result = hikcamera::SHMGetPtr(shm_fd_);
     if (!ptr_result.has_value()) {
         std::ignore = hikcamera::SHMClose(shm_fd_);
-        shm_fd_ = -1;
-        return std::unexpected { ShmCameraError {
-            ShmCameraErrorCode::ShmOpenFailed,
+        shm_fd_     = -1;
+        return std::unexpected { ShmCameraError { ShmCameraErrorCode::ShmOpenFailed,
             "ShmCamera: SHMGetPtr failed: " + ptr_result.error() } };
     }
     shm_ptr_ = ptr_result.value();
@@ -158,18 +157,18 @@ auto ShmCamera::is_open() const noexcept -> bool { return is_open_; }
 auto ShmCamera::wait_next(std::chrono::milliseconds timeout)
     -> std::expected<CameraFrame, ShmCameraError> {
     if (!is_open_ || shm_ptr_ == nullptr) {
-        return std::unexpected { ShmCameraError { ShmCameraErrorCode::InvalidFrame,
-            "ShmCamera: not open — call open() first" } };
+        return std::unexpected { ShmCameraError {
+            ShmCameraErrorCode::InvalidFrame, "ShmCamera: not open — call open() first" } };
     }
 
     constexpr int kPollIntervalMs = 1;
     constexpr int kMaxCopyRetries = 3;
-    using clock = std::chrono::steady_clock;
+    using clock                   = std::chrono::steady_clock;
 
     const auto deadline = clock::now() + timeout;
 
     // ── Phase 1: poll until frame_counter advances ─────────────────
-    uint64_t last_seen = shm_ptr_->frame_counter.load(std::memory_order_acquire);
+    uint64_t last_seen  = shm_ptr_->frame_counter.load(std::memory_order_acquire);
     uint64_t poll_start = last_seen; // snapshot before poll — used for timeout predicate
 
     while (clock::now() < deadline) {
@@ -185,8 +184,8 @@ auto ShmCamera::wait_next(std::chrono::milliseconds timeout)
     {
         uint64_t counter_now = shm_ptr_->frame_counter.load(std::memory_order_acquire);
         if (!is_valid_counter(counter_now) || !has_advanced(counter_now, poll_start)) {
-            return std::unexpected { ShmCameraError { ShmCameraErrorCode::Timeout,
-                "ShmCamera: no new frame within timeout" } };
+            return std::unexpected { ShmCameraError {
+                ShmCameraErrorCode::Timeout, "ShmCamera: no new frame within timeout" } };
         }
         // Update last_seen to latest even if we didn't advance during poll
         if (counter_now != last_seen) {
@@ -209,7 +208,7 @@ auto ShmCamera::wait_next(std::chrono::milliseconds timeout)
                 "ShmCamera: frame_counter is zero (uninitialized SHM?)" } };
         }
 
-        latest_seen   = counter_before;
+        latest_seen       = counter_before;
         unsigned int slot = completed_slot(counter_before, SLOT_NUM);
 
         // ── Copy RGB from SHM slot → owned local cv::Mat ─────────
@@ -230,12 +229,10 @@ auto ShmCamera::wait_next(std::chrono::milliseconds timeout)
 
         if (is_stable(counter_before, counter_after)) {
             // ── Stable: convert outside SHM critical section ──────
-            CameraFrame frame = convert(rgb, source_width_, source_height_,
-                target_width_, target_height_,
-                host_ns, /*frame_id=*/0, counter_before, img_time_offset_);
+            CameraFrame frame = convert(rgb, source_width_, source_height_, target_width_,
+                target_height_, host_ns, /*frame_id=*/0, counter_before, img_time_offset_);
             if (frame.gray.empty()) {
-                return std::unexpected { ShmCameraError {
-                    ShmCameraErrorCode::InvalidFrame,
+                return std::unexpected { ShmCameraError { ShmCameraErrorCode::InvalidFrame,
                     "ShmCamera: conversion produced empty frame (invalid SHM source)" } };
             }
             return frame;
@@ -257,21 +254,17 @@ auto ShmCamera::wait_next(std::chrono::milliseconds timeout)
 // convert — pure function, testable without hardware
 // ══════════════════════════════════════════════════════════════════
 
-auto ShmCamera::convert(const cv::Mat& rgb,
-    int source_width, int source_height,
-    int target_width, int target_height,
-    uint64_t host_monotonic_ns, uint64_t frame_id, uint64_t committed_sequence,
+auto ShmCamera::convert(const cv::Mat& rgb, int source_width, int source_height, int target_width,
+    int target_height, uint64_t host_monotonic_ns, uint64_t frame_id, uint64_t committed_sequence,
     double img_time_offset) -> CameraFrame {
     CameraFrame frame;
 
-    if (rgb.empty() || rgb.type() != CV_8UC3
-        || source_width <= 0 || source_height <= 0
+    if (rgb.empty() || rgb.type() != CV_8UC3 || source_width <= 0 || source_height <= 0
         || target_width <= 0 || target_height <= 0) {
         frame.sequence          = committed_sequence;
         frame.host_monotonic_ns = host_monotonic_ns;
         frame.frame_id          = frame_id;
-        frame.timestamp_seconds =
-            static_cast<double>(host_monotonic_ns) * 1e-9 + img_time_offset;
+        frame.timestamp_seconds = static_cast<double>(host_monotonic_ns) * 1e-9 + img_time_offset;
         return frame;
     }
 
@@ -280,8 +273,7 @@ auto ShmCamera::convert(const cv::Mat& rgb,
         frame.sequence          = committed_sequence;
         frame.host_monotonic_ns = host_monotonic_ns;
         frame.frame_id          = frame_id;
-        frame.timestamp_seconds =
-            static_cast<double>(host_monotonic_ns) * 1e-9 + img_time_offset;
+        frame.timestamp_seconds = static_cast<double>(host_monotonic_ns) * 1e-9 + img_time_offset;
         return frame;
     }
 

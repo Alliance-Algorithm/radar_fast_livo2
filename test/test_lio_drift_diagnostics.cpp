@@ -8,8 +8,8 @@
 //   Before the header exists, this file won't compile (RED).
 //   After lio_drift_diagnostics.hpp is implemented, these tests pass (GREEN).
 
-#include <gtest/gtest.h>
 #include <cmath>
+#include <gtest/gtest.h>
 
 #include "radar_fast_livo2/esikf_state.hpp"
 #include "radar_fast_livo2/lio_drift_diagnostics.hpp"
@@ -92,15 +92,15 @@ TEST(LioDriftMetricsTest, KnownAngularCorrectionDegrees) {
     auto m = compute_lio_drift_metrics(3, posterior, prior, V3D::Zero());
 
     EXPECT_NEAR(m.pos_correction, 0.0, 1e-6);
-    EXPECT_NEAR(m.ang_correction, 2.0, 1e-6);  // 2 degrees exactly
+    EXPECT_NEAR(m.ang_correction, 2.0, 1e-6); // 2 degrees exactly
 }
 
 TEST(LioDriftMetricsTest, KnownBiasNorms) {
     StatesGroup posterior;
     StatesGroup prior;
 
-    posterior.bias_g = V3D(0.01, 0.0, 0.0);   // norm = 0.01
-    posterior.bias_a = V3D(0.0, 0.02, 0.0);   // norm = 0.02
+    posterior.bias_g = V3D(0.01, 0.0, 0.0); // norm = 0.01
+    posterior.bias_a = V3D(0.0, 0.02, 0.0); // norm = 0.02
 
     auto m = compute_lio_drift_metrics(4, posterior, prior, V3D::Zero());
 
@@ -117,11 +117,11 @@ TEST(LioDriftMetricsTest, CovarianceDiagonalsSurface) {
     StatesGroup prior;
 
     // Set known diagonal values
-    posterior.cov(0, 0)  = 1.0e-4;   // rot x
-    posterior.cov(3, 3)  = 2.0e-3;   // pos x
-    posterior.cov(6, 6)  = 3.0e-2;   // vel x
-    posterior.cov(9, 9)  = 4.0e-5;   // bg x
-    posterior.cov(12, 12) = 5.0e-6;  // ba x
+    posterior.cov(0, 0)   = 1.0e-4; // rot x
+    posterior.cov(3, 3)   = 2.0e-3; // pos x
+    posterior.cov(6, 6)   = 3.0e-2; // vel x
+    posterior.cov(9, 9)   = 4.0e-5; // bg x
+    posterior.cov(12, 12) = 5.0e-6; // ba x
 
     auto m = compute_lio_drift_metrics(5, posterior, prior, V3D::Zero());
 
@@ -143,14 +143,14 @@ TEST(LioDriftMetricsTest, SmallCorrectionWhenPosteriorCloseToPrior) {
     // Prior and posterior almost the same: tiny dP, tiny dR
     prior.pos_end         = V3D(10.0, 10.0, 10.0);
     prior.rot_end         = M3D::Identity();
-    posterior.pos_end     = V3D(10.001, 10.000, 10.000);  // 1 mm offset
-    const double tiny_deg = 0.01 * M_PI / 180.0;          // 0.01°
+    posterior.pos_end     = V3D(10.001, 10.000, 10.000); // 1 mm offset
+    const double tiny_deg = 0.01 * M_PI / 180.0;         // 0.01°
     posterior.rot_end     = Eigen::AngleAxisd(tiny_deg, V3D::UnitZ()).toRotationMatrix();
 
     auto m = compute_lio_drift_metrics(10, posterior, prior, V3D::Zero());
 
     // Displacement is from reference (origin), not from prior
-    EXPECT_NEAR(m.displacement, std::sqrt(3.0 * 100.0), 0.002);  // ≈ 17.32
+    EXPECT_NEAR(m.displacement, std::sqrt(3.0 * 100.0), 0.002); // ≈ 17.32
     EXPECT_NEAR(m.pos_correction, 0.001, 1e-6);
     EXPECT_NEAR(m.ang_correction, 0.01, 1e-4);
 }

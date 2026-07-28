@@ -210,9 +210,8 @@ void ImuProcess::imu_init(const MeasureGroup& meas, StatesGroup& state) {
             "  Gravity:  [%.4f %.4f %.4f]  norm=%.4f\n"
             "  Acc cov (online):  [%.6f %.6f %.6f]\n"
             "  Gyro cov (online): [%.6f %.6f %.6f]",
-            state.gravity.x(), state.gravity.y(), state.gravity.z(), mean_acc_norm_,
-            acc_cov_.x(), acc_cov_.y(), acc_cov_.z(),
-            gyr_cov_.x(), gyr_cov_.y(), gyr_cov_.z());
+            state.gravity.x(), state.gravity.y(), state.gravity.z(), mean_acc_norm_, acc_cov_.x(),
+            acc_cov_.y(), acc_cov_.z(), gyr_cov_.x(), gyr_cov_.y(), gyr_cov_.z());
     }
 }
 
@@ -307,11 +306,10 @@ void ImuProcess::undistort_pcl(
         // available IMU sample is still before the requested frame end, use
         // the last measured rate/acceleration to reach that end time instead
         // of silently leaving a gap in the state timeline.
-        const bool last_pair = (i + 1 == v_imu.size() - 1);
+        const bool last_pair          = (i + 1 == v_imu.size() - 1);
         const bool extrapolate_to_end = last_pair && tail.timestamp < prop_end_time;
-        const double effective_end = extrapolate_to_end
-            ? prop_end_time
-            : std::min(tail.timestamp, prop_end_time);
+        const double effective_end =
+            extrapolate_to_end ? prop_end_time : std::min(tail.timestamp, prop_end_time);
         const bool past_end = extrapolate_to_end || tail.timestamp >= prop_end_time;
 
         if (head.timestamp >= prop_end_time || effective_end <= prop_beg_time) {

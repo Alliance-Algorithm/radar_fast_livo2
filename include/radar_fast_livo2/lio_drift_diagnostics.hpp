@@ -20,21 +20,21 @@ namespace radar::fast_livo2 {
 struct LioDriftMetrics {
     int frame_count;
 
-    double displacement;     // [m] posterior position from first-post-init reference
-    double total_path;       // [m] cumulative path length (sum of frame-to-frame deltas)
-    double speed_norm;       // [m/s] posterior linear velocity norm
-    double pos_correction;   // [m] IMU-prior → LiDAR-posterior position delta norm
-    double ang_correction;   // [deg] IMU-prior → LiDAR-posterior rotation delta norm
+    double displacement;   // [m] posterior position from first-post-init reference
+    double total_path;     // [m] cumulative path length (sum of frame-to-frame deltas)
+    double speed_norm;     // [m/s] posterior linear velocity norm
+    double pos_correction; // [m] IMU-prior → LiDAR-posterior position delta norm
+    double ang_correction; // [deg] IMU-prior → LiDAR-posterior rotation delta norm
 
-    double gyro_bias_norm;   // [rad/s] gyroscope bias norm
-    double accel_bias_norm;  // [m/s^2] accelerometer bias norm
+    double gyro_bias_norm;  // [rad/s] gyroscope bias norm
+    double accel_bias_norm; // [m/s^2] accelerometer bias norm
 
     // Posterior covariance diagonal entries (representative subset)
-    double cov_rot;  // rotation (index 0)
-    double cov_pos;  // position (index 3)
-    double cov_vel;  // velocity (index 6)
-    double cov_bg;   // gyro bias (index 9)
-    double cov_ba;   // accel bias (index 12)
+    double cov_rot; // rotation (index 0)
+    double cov_pos; // position (index 3)
+    double cov_vel; // velocity (index 6)
+    double cov_bg;  // gyro bias (index 9)
+    double cov_ba;  // accel bias (index 12)
 };
 
 /// Compute all LIO drift metrics from ESIKF state snapshots.
@@ -44,13 +44,9 @@ struct LioDriftMetrics {
 /// @param prior           IMU-only prior state (saved before StateEstimation)
 /// @param ref_position    Reference position captured after map init
 /// @return                Populated LioDriftMetrics struct
-[[nodiscard]] inline LioDriftMetrics compute_lio_drift_metrics(
-    int frame_count,
-    const StatesGroup& posterior,
-    const StatesGroup& prior,
-    const V3D& ref_position) noexcept
-{
-    LioDriftMetrics m{};
+[[nodiscard]] inline LioDriftMetrics compute_lio_drift_metrics(int frame_count,
+    const StatesGroup& posterior, const StatesGroup& prior, const V3D& ref_position) noexcept {
+    LioDriftMetrics m { };
     m.frame_count = frame_count;
 
     // ── Displacement from first-post-init reference ──

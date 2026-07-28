@@ -191,10 +191,10 @@ TEST(ShmCameraSlotProtocol, ZeroCounterRejected) {
 }
 
 TEST(ShmCameraSlotProtocol, NoNewFrameDetected) {
-    EXPECT_FALSE(has_advanced(0, 5));    // zero counter
-    EXPECT_FALSE(has_advanced(5, 5));    // same value
-    EXPECT_TRUE(has_advanced(6, 5));     // advanced
-    EXPECT_TRUE(has_advanced(1, 0));     // first frame after zero
+    EXPECT_FALSE(has_advanced(0, 5)); // zero counter
+    EXPECT_FALSE(has_advanced(5, 5)); // same value
+    EXPECT_TRUE(has_advanced(6, 5));  // advanced
+    EXPECT_TRUE(has_advanced(1, 0));  // first frame after zero
 }
 
 TEST(ShmCameraSlotProtocol, StabilityCheckWorks) {
@@ -221,7 +221,7 @@ TEST(ShmCameraConvert, RGBvsBGRGrayscaleNumerical) {
     // COLOR_RGB2GRAY: 0.299*255 + 0.587*0 + 0.114*0 ≈ 76
     // COLOR_BGR2GRAY: 0.114*255 + 0.587*0 + 0.299*0 ≈ 29  ← WRONG
 
-    cv::Mat rgb(1, 3, CV_8UC3);  // 1 row, 3 columns of pixels
+    cv::Mat rgb(1, 3, CV_8UC3); // 1 row, 3 columns of pixels
     // Column 0: pure red (SHM: [R=255, G=0, B=0])
     rgb.at<cv::Vec3b>(0, 0) = cv::Vec3b(0, 0, 255);
     // Column 1: pure green (SHM: [R=0, G=255, B=0])
@@ -229,15 +229,14 @@ TEST(ShmCameraConvert, RGBvsBGRGrayscaleNumerical) {
     // Column 2: pure blue (SHM: [R=0, G=0, B=255])
     rgb.at<cv::Vec3b>(0, 2) = cv::Vec3b(255, 0, 0);
 
-    CameraFrame result = ShmCamera::convert(rgb, 3, 1, 3, 1,
-        0, 0, 1, 0.0);
+    CameraFrame result = ShmCamera::convert(rgb, 3, 1, 3, 1, 0, 0, 1, 0.0);
     ASSERT_FALSE(result.gray.empty());
     EXPECT_EQ(result.gray.cols, 3);
     EXPECT_EQ(result.gray.rows, 1);
 
-    const int expected_red   = static_cast<int>(0.114 * 255 + 0.5);  // ≈ 29
-    const int expected_green = static_cast<int>(0.587 * 255 + 0.5);  // ≈ 150
-    const int expected_blue  = static_cast<int>(0.299 * 255 + 0.5);  // ≈ 76
+    const int expected_red   = static_cast<int>(0.114 * 255 + 0.5); // ≈ 29
+    const int expected_green = static_cast<int>(0.587 * 255 + 0.5); // ≈ 150
+    const int expected_blue  = static_cast<int>(0.299 * 255 + 0.5); // ≈ 76
 
     EXPECT_EQ(result.gray.at<uint8_t>(0, 0), expected_red);
     EXPECT_EQ(result.gray.at<uint8_t>(0, 1), expected_green);
@@ -281,13 +280,11 @@ TEST(ShmCameraConvert, SourceVsTargetDimensionsDiffer) {
     for (int r = 0; r < src_h; ++r) {
         auto* row = rgb.ptr<cv::Vec3b>(r);
         for (int c = 0; c < src_w; ++c) {
-            row[c] = cv::Vec3b(static_cast<uint8_t>(r),
-                               static_cast<uint8_t>(c), 128);
+            row[c] = cv::Vec3b(static_cast<uint8_t>(r), static_cast<uint8_t>(c), 128);
         }
     }
 
-    CameraFrame result = ShmCamera::convert(rgb, src_w, src_h, tgt_w, tgt_h,
-        0, 0, 1, 0.0);
+    CameraFrame result = ShmCamera::convert(rgb, src_w, src_h, tgt_w, tgt_h, 0, 0, 1, 0.0);
 
     EXPECT_EQ(result.gray.cols, tgt_w);
     EXPECT_EQ(result.gray.rows, tgt_h);
@@ -300,8 +297,7 @@ TEST(ShmCameraConvert, SourceDimensionsMustMatchInputMat) {
     cv::Mat rgb(4, 4, CV_8UC3, cv::Scalar(128, 128, 128));
 
     // Declare source as 8×8 but pass a 4×4 mat → empty gray
-    CameraFrame result = ShmCamera::convert(rgb, 8, 8, 4, 4,
-        0, 0, 1, 0.0);
+    CameraFrame result = ShmCamera::convert(rgb, 8, 8, 4, 4, 0, 0, 1, 0.0);
     EXPECT_TRUE(result.gray.empty());
 }
 
@@ -320,8 +316,7 @@ TEST(ShmCameraConvert, PatternPreservedThroughResize) {
         }
     }
 
-    CameraFrame result = ShmCamera::convert(rgb, src_w, src_h, tgt_w, tgt_h,
-        0, 0, 1, 0.0);
+    CameraFrame result = ShmCamera::convert(rgb, src_w, src_h, tgt_w, tgt_h, 0, 0, 1, 0.0);
 
     EXPECT_EQ(result.gray.cols, tgt_w);
     EXPECT_EQ(result.gray.rows, tgt_h);
@@ -352,8 +347,7 @@ TEST(ShmCameraConvert, TargetSmallerThanSourceIsValid) {
 
     cv::Mat rgb(src_h, src_w, CV_8UC3, cv::Scalar(128, 128, 128));
 
-    CameraFrame result = ShmCamera::convert(rgb, src_w, src_h, tgt_w, tgt_h,
-        0, 0, 1, 0.0);
+    CameraFrame result = ShmCamera::convert(rgb, src_w, src_h, tgt_w, tgt_h, 0, 0, 1, 0.0);
 
     EXPECT_EQ(result.gray.cols, tgt_w);
     EXPECT_EQ(result.gray.rows, tgt_h);

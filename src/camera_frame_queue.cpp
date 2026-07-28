@@ -47,15 +47,13 @@ auto CameraFrameQueue::take_nearest(double target_time, double tolerance_sec)
     return selected;
 }
 
-auto CameraFrameQueue::oldest_timestamp() const -> std::optional<double>
-{
+auto CameraFrameQueue::oldest_timestamp() const -> std::optional<double> {
     std::lock_guard<std::mutex> lock(mutex_);
     if (frames_.empty()) return std::nullopt;
     return frames_.front().timestamp_seconds;
 }
 
-auto CameraFrameQueue::nearest_timestamp(double target_time) const -> std::optional<double>
-{
+auto CameraFrameQueue::nearest_timestamp(double target_time) const -> std::optional<double> {
     std::lock_guard<std::mutex> lock(mutex_);
     if (frames_.empty()) return std::nullopt;
 
@@ -71,8 +69,7 @@ auto CameraFrameQueue::nearest_timestamp(double target_time) const -> std::optio
     return best_time;
 }
 
-auto CameraFrameQueue::take_oldest() -> std::optional<CameraFrame>
-{
+auto CameraFrameQueue::take_oldest() -> std::optional<CameraFrame> {
     std::lock_guard<std::mutex> lock(mutex_);
     if (frames_.empty()) return std::nullopt;
 
@@ -81,11 +78,11 @@ auto CameraFrameQueue::take_oldest() -> std::optional<CameraFrame>
     return selected;
 }
 
-void CameraFrameQueue::set_max_size(size_t max_size)
-{
+void CameraFrameQueue::set_max_size(size_t max_size) {
     std::lock_guard<std::mutex> lock(mutex_);
     max_size_ = max_size;
-    while (frames_.size() > max_size_) frames_.pop_front();
+    while (frames_.size() > max_size_)
+        frames_.pop_front();
 }
 
 auto CameraFrameQueue::empty() const -> bool {

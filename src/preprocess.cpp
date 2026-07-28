@@ -107,9 +107,8 @@ void Preprocess::odin1_handler(
         pt.y         = y;
         pt.z         = z;
         pt.intensity = static_cast<float>(intensity);
-        pt.curvature = (std::isfinite(offset_time) && offset_time >= 0.0f)
-            ? offset_time * 1000.0f
-            : 0.0f;
+        pt.curvature =
+            (std::isfinite(offset_time) && offset_time >= 0.0f) ? offset_time * 1000.0f : 0.0f;
         out->push_back(pt);
     }
 

@@ -48,14 +48,14 @@
 #include <sensor_msgs/msg/point_cloud2.hpp>
 #include <tf2_ros/transform_broadcaster.h>
 
+#include <algorithm>
 #include <array>
 #include <atomic>
 #include <chrono>
-#include <condition_variable>
 #include <cmath>
+#include <condition_variable>
 #include <deque>
 #include <filesystem>
-#include <algorithm>
 #include <limits>
 #include <mutex>
 #include <optional>
@@ -268,18 +268,18 @@ private:
             ext_r[8];
         imu_process_.set_extrinsic(t_li, r_li);
 
-        img_time_offset_ = get_parameter("img_time_offset").as_double();
-        imu_time_offset_ = get_parameter("imu_time_offset").as_double();
-        img_scale_       = get_parameter("img_scale").as_double();
+        img_time_offset_    = get_parameter("img_time_offset").as_double();
+        imu_time_offset_    = get_parameter("imu_time_offset").as_double();
+        img_scale_          = get_parameter("img_scale").as_double();
         gravity_acc_thresh_ = get_parameter("gravity_acc_thresh").as_double();
         if (!get_parameter("gravity_alignment_en").as_bool()) {
             imu_process_.disable_gravity_est();
         }
 
-        camera_queue_size_ = static_cast<size_t>(std::max<int64_t>(
-            1, get_parameter("camera/queue_size").as_int()));
+        camera_queue_size_ =
+            static_cast<size_t>(std::max<int64_t>(1, get_parameter("camera/queue_size").as_int()));
         camera_sync_tolerance_sec_ = get_parameter("camera/sync_tolerance_sec").as_double();
-        camera_sync_diag_en_ = get_parameter("camera/sync_diag_en").as_bool();
+        camera_sync_diag_en_       = get_parameter("camera/sync_diag_en").as_bool();
         camera_queue_.set_max_size(camera_queue_size_);
 
         // ── Camera 初始化（仅 LIVO 模式）──
@@ -287,13 +287,11 @@ private:
         if (img_en_) {
             camera_input_mode_ = get_parameter("camera_input_mode").as_string();
             if (camera_input_mode_ != "shm" && camera_input_mode_ != "ros_image") {
-                throw std::runtime_error(
-                    "camera_input_mode must be 'shm' or 'ros_image', got: '"
+                throw std::runtime_error("camera_input_mode must be 'shm' or 'ros_image', got: '"
                     + camera_input_mode_ + "'");
             }
             camera_image_topic_ = get_parameter("camera/image_topic").as_string();
-            RosImageCamera::validate_topic_not_empty(
-                camera_input_mode_, camera_image_topic_);
+            RosImageCamera::validate_topic_not_empty(camera_input_mode_, camera_image_topic_);
 
             cam_width_  = get_parameter("cam_width").as_int();
             cam_height_ = get_parameter("cam_height").as_int();
@@ -304,27 +302,22 @@ private:
 
             if (camera_input_mode_ == "shm") {
                 const std::string shm_name = get_parameter("camera/shm_name").as_string();
-                int shm_image_w = get_parameter("camera/shm_image_width").as_int();
-                int shm_image_h = get_parameter("camera/shm_image_height").as_int();
+                int shm_image_w            = get_parameter("camera/shm_image_width").as_int();
+                int shm_image_h            = get_parameter("camera/shm_image_height").as_int();
                 if (shm_image_w <= 0 || shm_image_h <= 0) {
-                    throw std::runtime_error(
-                        "LIVO: invalid SHM image size (shm_image_width/height)");
+                    throw std::runtime_error("LIVO: invalid SHM image size "
+                                             "(shm_image_width/height)");
                 }
                 camera_ = std::make_unique<ShmCamera>(
-                    shm_name,
-                    shm_image_w, shm_image_h,
-                    cam_width_, cam_height_,
-                    img_time_offset_);
+                    shm_name, shm_image_w, shm_image_h, cam_width_, cam_height_, img_time_offset_);
                 RCLCPP_INFO(get_logger(),
                     "Camera SHM: '%s' source=%dx%d → target=%dx%d gray (RGB→GRAY+resize), "
                     "offset=%.3fs",
-                    shm_name.c_str(), shm_image_w, shm_image_h,
-                    cam_width_, cam_height_, img_time_offset_);
+                    shm_name.c_str(), shm_image_w, shm_image_h, cam_width_, cam_height_,
+                    img_time_offset_);
             } else {
-                RCLCPP_INFO(get_logger(),
-                    "Camera ROS Image: topic='%s' -> %dx%d gray, queue=%zu",
-                    camera_image_topic_.c_str(), cam_width_, cam_height_,
-                    camera_queue_size_);
+                RCLCPP_INFO(get_logger(), "Camera ROS Image: topic='%s' -> %dx%d gray, queue=%zu",
+                    camera_image_topic_.c_str(), cam_width_, cam_height_, camera_queue_size_);
             }
         }
 
@@ -345,10 +338,10 @@ private:
             rcl << rcl_[0], rcl_[1], rcl_[2], rcl_[3], rcl_[4], rcl_[5], rcl_[6], rcl_[7], rcl_[8];
 
             // cam_width/cam_height already loaded above
-            const double cam_fx = get_parameter("cam_fx").as_double();
-            const double cam_fy = get_parameter("cam_fy").as_double();
-            const double cam_cx = get_parameter("cam_cx").as_double();
-            const double cam_cy = get_parameter("cam_cy").as_double();
+            const double cam_fx           = get_parameter("cam_fx").as_double();
+            const double cam_fy           = get_parameter("cam_fy").as_double();
+            const double cam_cx           = get_parameter("cam_cx").as_double();
+            const double cam_cy           = get_parameter("cam_cy").as_double();
             const int patch_size          = get_parameter("patch_size").as_int();
             const int patch_pyramid_level = get_parameter("patch_pyramid_level").as_int();
 
@@ -368,8 +361,8 @@ private:
                                          "(cam_fx/fy/width/height)");
             }
 
-            vio_manager_.init(cam_fx, cam_fy, cam_cx, cam_cy, cam_width_, cam_height_, rcl, pcl, Rli,
-                Pli, patch_size, patch_pyramid_level, /*grid_size=*/20,
+            vio_manager_.init(cam_fx, cam_fy, cam_cx, cam_cy, cam_width_, cam_height_, rcl, pcl,
+                Rli, Pli, patch_size, patch_pyramid_level, /*grid_size=*/20,
                 /*normal_en=*/true, /*ncc_en=*/true,
                 /*img_point_cov=*/100.0, /*ncc_thre=*/0.6,
                 /*max_iterations=*/5);
@@ -451,11 +444,10 @@ private:
             camera_running_.store(true);
             camera_thread_ = std::thread([this]() { camera_loop(); });
         } else if (camera_input_mode_ == "ros_image") {
-            sub_image_ = create_subscription<sensor_msgs::msg::Image>(
-                camera_image_topic_, rclcpp::SensorDataQoS(),
+            sub_image_ = create_subscription<sensor_msgs::msg::Image>(camera_image_topic_,
+                rclcpp::SensorDataQoS(),
                 [this](const sensor_msgs::msg::Image::SharedPtr msg) { on_image(msg); });
-            RCLCPP_INFO(get_logger(),
-                "Camera ROS Image subscription created on '%s'",
+            RCLCPP_INFO(get_logger(), "Camera ROS Image subscription created on '%s'",
                 camera_image_topic_.c_str());
         }
     }
@@ -485,7 +477,7 @@ private:
                     continue;
 =======
                 if (err.code == ShmCameraErrorCode::Timeout) {
-                    continue; // timeout: normal, retry
+                    continue;           // timeout: normal, retry
 >>>>>>> feat/lio-tuning-safety-gate
                 }
                 // Fatal reader error: log once, terminate worker
@@ -501,8 +493,7 @@ private:
 
     /// ROS Image 回调（ros_image 模式）：验证 BGR8，转灰度 → 入队
     void on_image(const sensor_msgs::msg::Image::SharedPtr msg) {
-        auto frame = RosImageCamera::convert(
-            *msg, cam_width_, cam_height_, ++ros_image_seq_);
+        auto frame = RosImageCamera::convert(*msg, cam_width_, cam_height_, ++ros_image_seq_);
         if (!frame.has_value()) return;
         std::ignore = camera_queue_.push(std::move(*frame));
         request_processing();
@@ -523,8 +514,9 @@ private:
     void init_publishers() {
         pub_odom_  = create_publisher<nav_msgs::msg::Odometry>("/fast_livo2/odom", 10);
         pub_cloud_ = create_publisher<sensor_msgs::msg::PointCloud2>("/fast_livo2/cloud_world", 10);
-        pub_cloud_lidar_ = create_publisher<sensor_msgs::msg::PointCloud2>("/fast_livo2/cloud_lidar", 10);
-        pub_path_  = create_publisher<nav_msgs::msg::Path>("/fast_livo2/path", 10);
+        pub_cloud_lidar_ =
+            create_publisher<sensor_msgs::msg::PointCloud2>("/fast_livo2/cloud_lidar", 10);
+        pub_path_       = create_publisher<nav_msgs::msg::Path>("/fast_livo2/path", 10);
         tf_broadcaster_ = std::make_unique<tf2_ros::TransformBroadcaster>(*this);
     }
 
@@ -577,20 +569,17 @@ private:
         if (consumed_until <= 0.0) return;
 
         std::lock_guard<std::mutex> lock(imu_buf_mutex_);
-        const auto first_unconsumed = std::upper_bound(
-            imu_buf_.begin(), imu_buf_.end(), consumed_until,
-            [](double timestamp, const ImuData& imu) {
-                return timestamp < imu.timestamp;
-            });
+        const auto first_unconsumed =
+            std::upper_bound(imu_buf_.begin(), imu_buf_.end(), consumed_until,
+                [](double timestamp, const ImuData& imu) { return timestamp < imu.timestamp; });
         imu_buf_.erase(imu_buf_.begin(), first_unconsumed);
     }
 
     void processing_loop() {
         while (true) {
             std::unique_lock<std::mutex> lock(process_signal_mutex_);
-            process_signal_cv_.wait(lock, [this]() {
-                return process_requested_ || !processing_running_.load();
-            });
+            process_signal_cv_.wait(
+                lock, [this]() { return process_requested_ || !processing_running_.load(); });
             if (!processing_running_.load()) return;
             process_requested_ = false;
             lock.unlock();
@@ -606,8 +595,8 @@ private:
     // 从相机队列中选时间最接近的一帧并消费之。
     // 超过 camera/sync_tolerance_sec 容忍范围时返回 false，跳过本帧 VIO。
     bool get_nearest_image(double target_time, double frame_duration, cv::Mat& out_gray) {
-        const auto nearest = camera_queue_.nearest_timestamp(target_time);
-        const auto oldest  = camera_queue_.oldest_timestamp();
+        const auto nearest      = camera_queue_.nearest_timestamp(target_time);
+        const auto oldest       = camera_queue_.oldest_timestamp();
         const size_t queue_size = camera_queue_.size();
         auto result = camera_queue_.take_nearest(target_time, camera_sync_tolerance_sec_);
         if (!result) {
@@ -678,7 +667,7 @@ private:
         // IMU callbacks retry the same front LiDAR frame until IMU catches up.
         // Cache the preprocessed front frame so those retries do not repeatedly
         // parse tens of thousands of points and starve image callbacks.
-        auto raw_cloud = std::make_shared<PointCloudT>();
+        auto raw_cloud   = std::make_shared<PointCloudT>();
         double frame_beg = 0.0;
         double frame_end = 0.0;
         if (pending_lidar_msg_.get() == lidar_msg.get() && pending_raw_cloud_) {
@@ -770,7 +759,8 @@ private:
         {
             sensor_msgs::msg::PointCloud2 lidar_cloud_msg;
             pcl::toROSMsg(*feats_undistort, lidar_cloud_msg);
-            lidar_cloud_msg.header.stamp = rclcpp::Time(static_cast<int64_t>(std::llround(frame_end * 1e9)));
+            lidar_cloud_msg.header.stamp =
+                rclcpp::Time(static_cast<int64_t>(std::llround(frame_end * 1e9)));
             lidar_cloud_msg.header.frame_id = "odin1_base_link";
             pub_cloud_lidar_->publish(lidar_cloud_msg);
         }
@@ -839,15 +829,15 @@ private:
         // On motion onset, compute rotation to re-align roll/pitch — useful
         // for recovery after occlusion-induced drift.
         if (imu_process_.gravity_align && lidar_map_inited_) {
-            const double acc_norm = (imu_process_.mean_acc_norm() > 1e-6)
-                ? imu_process_.mean_acc_norm() : 9.81;
+            const double acc_norm =
+                (imu_process_.mean_acc_norm() > 1e-6) ? imu_process_.mean_acc_norm() : 9.81;
             const double acc_std = std::abs(acc_norm - 9.81);
 
             if (acc_std < gravity_acc_thresh_ && feats_down_size > 500) {
                 // Stationary: accumulate world-frame gravity direction
                 const V3D grav_world = state_.gravity;
                 if (!gravity_is_stationary_) {
-                    gravity_stationary_acc_ = Eigen::Vector3d::Zero();
+                    gravity_stationary_acc_   = Eigen::Vector3d::Zero();
                     gravity_stationary_count_ = 0;
                 }
                 gravity_stationary_acc_ += grav_world;
@@ -858,19 +848,21 @@ private:
                 // compute rotation aligning estimated gravity → expected gravity
                 const V3D avg_grav = gravity_stationary_acc_ / gravity_stationary_count_;
                 const V3D expected_grav(0.0, 0.0, -9.81);
-                const V3D axis = avg_grav.cross(expected_grav);
+                const V3D axis         = avg_grav.cross(expected_grav);
                 const double axis_norm = axis.norm();
                 if (axis_norm > 1e-6) {
-                    const double angle = std::acos(
-                        std::clamp(avg_grav.dot(expected_grav)
-                            / (avg_grav.norm() * expected_grav.norm()), -1.0, 1.0));
-                    const V3D u = axis / axis_norm;
+                    const double angle = std::acos(std::clamp(
+                        avg_grav.dot(expected_grav) / (avg_grav.norm() * expected_grav.norm()),
+                        -1.0, 1.0));
+                    const V3D u        = axis / axis_norm;
                     const double ca = std::cos(angle), sa = std::sin(angle);
                     Eigen::Matrix3d R_align;
-                    R_align <<
-                        ca + u.x()*u.x()*(1-ca), u.x()*u.y()*(1-ca) - u.z()*sa, u.x()*u.z()*(1-ca) + u.y()*sa,
-                        u.y()*u.x()*(1-ca) + u.z()*sa, ca + u.y()*u.y()*(1-ca), u.y()*u.z()*(1-ca) - u.x()*sa,
-                        u.z()*u.x()*(1-ca) - u.y()*sa, u.z()*u.y()*(1-ca) + u.x()*sa, ca + u.z()*u.z()*(1-ca);
+                    R_align << ca + u.x() * u.x() * (1 - ca), u.x() * u.y() * (1 - ca) - u.z() * sa,
+                        u.x() * u.z() * (1 - ca) + u.y() * sa,
+                        u.y() * u.x() * (1 - ca) + u.z() * sa, ca + u.y() * u.y() * (1 - ca),
+                        u.y() * u.z() * (1 - ca) - u.x() * sa,
+                        u.z() * u.x() * (1 - ca) - u.y() * sa,
+                        u.z() * u.y() * (1 - ca) + u.x() * sa, ca + u.z() * u.z() * (1 - ca);
                     state_.rot_end = R_align * state_.rot_end;
                     RCLCPP_INFO_THROTTLE(get_logger(), *get_clock(), 5000,
                         "Gravity alignment: %.1fdeg correction (%.0f stationary frames)",
@@ -908,8 +900,8 @@ private:
         // the voxel map (e.g. during aggressive turns where LiDAR constraints
         // momentarily weaken).  State estimation itself still runs so the
         // ESIKF can recover on subsequent frames with stronger constraints.
-        const double eff_ratio = static_cast<double>(voxel_map_.effct_feat_num_)
-            / static_cast<double>(feats_down_size);
+        const double eff_ratio =
+            static_cast<double>(voxel_map_.effct_feat_num_) / static_cast<double>(feats_down_size);
         const bool safe_to_update = (eff_ratio >= 0.15 && voxel_map_.effct_feat_num_ >= 600);
         if (safe_to_update) {
             voxel_map_.UpdateVoxelMap(voxel_map_.pv_list_);
@@ -953,7 +945,7 @@ private:
         // ── 12. 发布世界系点云 ──
         const int64_t output_ns = static_cast<int64_t>(std::llround(frame_end * 1e9));
         builtin_interfaces::msg::Time output_stamp;
-        output_stamp.sec = static_cast<int32_t>(output_ns / 1000000000LL);
+        output_stamp.sec     = static_cast<int32_t>(output_ns / 1000000000LL);
         output_stamp.nanosec = static_cast<uint32_t>(output_ns % 1000000000LL);
         publish_cloud_world(world_lidar, output_stamp);
 
@@ -1004,9 +996,9 @@ private:
         // ── 17. LIO drift diagnostics (ONLY_LIO, 1Hz throttled) ──
         if (lidar_map_inited_) {
             if (!drift_ref_captured_) {
-                drift_ref_position_ = state_.pos_end;
+                drift_ref_position_  = state_.pos_end;
                 last_drift_position_ = state_.pos_end;
-                drift_ref_captured_ = true;
+                drift_ref_captured_  = true;
             }
             total_path_ += (state_.pos_end - last_drift_position_).norm();
             last_drift_position_ = state_.pos_end;
@@ -1018,8 +1010,7 @@ private:
                 "[DRIFT] fr=%d | disp=%.3fm path=%.1fm | spd=%.2f | dP=%.3fm | dR=%.2fdeg"
                 " | bg=%.5f | ba=%.5f | cov_r=%.2e cov_p=%.2e cov_v=%.2e",
                 diag.frame_count, diag.displacement, total_path_, diag.speed_norm,
-                diag.pos_correction, diag.ang_correction,
-                diag.gyro_bias_norm, diag.accel_bias_norm,
+                diag.pos_correction, diag.ang_correction, diag.gyro_bias_norm, diag.accel_bias_norm,
                 diag.cov_rot, diag.cov_pos, diag.cov_vel);
         }
     }
@@ -1143,19 +1134,19 @@ private:
 
     // ── 成员变量 ─────────────────────────────────────────────────
     std::string lidar_topic_, imu_topic_;
-    int slam_mode_               = SlamMode::ONLY_LIO;
-    bool img_en_                 = false;
-    double img_time_offset_      = 0.0;
-    double imu_time_offset_      = 0.0;
-    double img_scale_            = 0.5;
+    int slam_mode_                    = SlamMode::ONLY_LIO;
+    bool img_en_                      = false;
+    double img_time_offset_           = 0.0;
+    double imu_time_offset_           = 0.0;
+    double img_scale_                 = 0.5;
     double camera_sync_tolerance_sec_ = 0.12;
-    size_t camera_queue_size_ = 30;
-    bool camera_sync_diag_en_ = true;
-    double filter_size_surf_     = 0.1;
-    bool pcd_save_en_            = false;
-    int pcd_save_interval_       = -1;
-    int pcd_save_seq_            = 0;
-    int pcd_save_period_counter_ = 0;
+    size_t camera_queue_size_         = 30;
+    bool camera_sync_diag_en_         = true;
+    double filter_size_surf_          = 0.1;
+    bool pcd_save_en_                 = false;
+    int pcd_save_interval_            = -1;
+    int pcd_save_seq_                 = 0;
+    int pcd_save_period_counter_      = 0;
     std::string map_save_path_;
     std::string save_trigger_path_ = "/tmp/fast_livo2_save_map";
     rclcpp::TimerBase::SharedPtr save_trigger_timer_;
@@ -1175,10 +1166,10 @@ private:
     CameraFrameQueue camera_queue_ { 5 }; // bounded ≤5, at-most-once per sequence
 
     // ── ROS Image 相机（仅 ros_image 模式）──
-    std::string camera_input_mode_ { "shm" };   // "shm" or "ros_image"
-    std::string camera_image_topic_;             // ROS Image topic name
+    std::string camera_input_mode_ { "shm" }; // "shm" or "ros_image"
+    std::string camera_image_topic_;          // ROS Image topic name
     rclcpp::Subscription<sensor_msgs::msg::Image>::SharedPtr sub_image_;
-    std::atomic<uint64_t> ros_image_seq_ { 0 };  // monotonically-increasing local sequence
+    std::atomic<uint64_t> ros_image_seq_ { 0 }; // monotonically-increasing local sequence
     int cam_width_ { 0 };
     int cam_height_ { 0 };
 
@@ -1204,15 +1195,15 @@ private:
     bool lidar_map_inited_ = false;
 
     // LIO drift diagnostics reference (captured after first post-init posterior)
-    V3D drift_ref_position_ = V3D::Zero();
+    V3D drift_ref_position_  = V3D::Zero();
     bool drift_ref_captured_ = false;
-    double total_path_ = 0.0;
+    double total_path_       = 0.0;
     V3D last_drift_position_ = V3D::Zero();
 
     // Gravity alignment
-    double gravity_acc_thresh_ = 0.3;
+    double gravity_acc_thresh_  = 0.3;
     bool gravity_is_stationary_ = false;
-    V3D gravity_stationary_acc_{0, 0, 0};
+    V3D gravity_stationary_acc_ { 0, 0, 0 };
     int gravity_stationary_count_ = 0;
 
     // 视觉直接法前端（仅 LIVO 模式启用）

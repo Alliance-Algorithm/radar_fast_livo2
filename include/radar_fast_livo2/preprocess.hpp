@@ -20,10 +20,10 @@ public:
 
     // ── 配置 ────────────────────────────────────────────────────
     int lidar_type                = LidarType::ODIN1;
-    int point_filter_num          = 4;     // 每 N 个点取 1 个（降采样）
-    float blind                   = 0.1f;  // 最近有效距离 (m)
-    float max_range               = 30.0f; // 最远有效距离 (m)
-    uint16_t confidence_threshold = 35;    // Odin1 专用：置信度阈值
+    int point_filter_num          = 4;      // 每 N 个点取 1 个（降采样）
+    float blind                   = 0.1f;   // 最近有效距离 (m)
+    float max_range               = 30.0f;  // 最远有效距离 (m)
+    uint16_t confidence_threshold = 35;     // Odin1 专用：置信度阈值
     double point_time_scale       = 1000.0; // seconds in PointCloud2 -> curvature milliseconds
 
 private:
