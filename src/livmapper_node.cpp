@@ -848,22 +848,13 @@ private:
                 // compute rotation aligning estimated gravity → expected gravity
                 const V3D avg_grav = gravity_stationary_acc_ / gravity_stationary_count_;
                 const V3D expected_grav(0.0, 0.0, -9.81);
-                const V3D axis         = avg_grav.cross(expected_grav);
-                const double axis_norm = axis.norm();
-                if (axis_norm > 1e-6) {
+                const double avg_grav_norm = avg_grav.norm();
+                if (std::isfinite(avg_grav_norm) && avg_grav_norm > 1e-6) {
                     const double angle = std::acos(std::clamp(
-                        avg_grav.dot(expected_grav) / (avg_grav.norm() * expected_grav.norm()),
-                        -1.0, 1.0));
-                    const V3D u        = axis / axis_norm;
-                    const double ca = std::cos(angle), sa = std::sin(angle);
-                    Eigen::Matrix3d R_align;
-                    R_align << ca + u.x() * u.x() * (1 - ca), u.x() * u.y() * (1 - ca) - u.z() * sa,
-                        u.x() * u.z() * (1 - ca) + u.y() * sa,
-                        u.y() * u.x() * (1 - ca) + u.z() * sa, ca + u.y() * u.y() * (1 - ca),
-                        u.y() * u.z() * (1 - ca) - u.x() * sa,
-                        u.z() * u.x() * (1 - ca) - u.y() * sa,
-                        u.z() * u.y() * (1 - ca) + u.x() * sa, ca + u.z() * u.z() * (1 - ca);
-                    state_.rot_end = R_align * state_.rot_end;
+                        avg_grav.dot(expected_grav) / (avg_grav_norm * expected_grav.norm()), -1.0,
+                        1.0));
+                    state_.rot_end =
+                        lie::SO3d::fromTwoVectors(avg_grav, expected_grav) * state_.rot_end;
                     RCLCPP_INFO_THROTTLE(get_logger(), *get_clock(), 5000,
                         "Gravity alignment: %.1fdeg correction (%.0f stationary frames)",
                         angle * 180.0 / M_PI, static_cast<double>(gravity_stationary_count_));

@@ -43,7 +43,7 @@ void VIOManager::init(double fx, double fy, double cx, double cy, int width, int
 
     Jdphi_dR_ = Rci_;
     V3D Pic   = -Rci_.transpose() * Pci_;
-    Jdp_dR_   = -Rci_ * skewSym(Pic);
+    Jdp_dR_   = -Rci_ * lie::SO3d::hat(Pic);
 
     grid_n_width_  = std::max(1, width_ / grid_size_ + 1);
     grid_n_height_ = std::max(1, height_ / grid_size_ + 1);
@@ -488,7 +488,7 @@ void VIOManager::updateState(const cv::Mat& img, int level) {
             const Eigen::Vector2d pc = world2cam(pf);
             if (!isInFrame(pc, margin)) continue;
 
-            const M3D p_hat = skewSym(pf);
+            const M3D p_hat = lie::SO3d::hat(pf);
 
             const int u_ref_i    = static_cast<int>(std::floor(pc.x() / scale)) * scale;
             const int v_ref_i    = static_cast<int>(std::floor(pc.y() / scale)) * scale;

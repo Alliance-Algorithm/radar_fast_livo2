@@ -1,7 +1,7 @@
 #pragma once
-// esikf_state.hpp - SO3 数学工具 + pointWithVar + ESIKF 19维状态（跳过 inv_expo_time = 18 维）
+// esikf_state.hpp - SO3 state math + pointWithVar + ESIKF 19维状态（跳过 inv_expo_time = 18 维）
 // 原始来源: hku-mars/FAST-LIVO2/include/common_lib.h (StatesGroup, pointWithVar)
-//           hku-mars/FAST-LIVO2/include/utils/so3_math.h (Exp, Log, SKEW_SYM_MATRX)
+//           hku-mars/FAST-LIVO2/include/utils/so3_math.h (SO3 exponential, logarithm, skew)
 //
 // 移植: radar_fast_livo2 项目（纯 Eigen 实现，不依赖 Sophus）
 //
@@ -19,6 +19,8 @@
 #include <Eigen/Geometry>
 #include <cmath>
 
+#include "radar_fast_livo2/lie.hpp"
+
 namespace radar::fast_livo2 {
 
 // ── 维度常量 ────────────────────────────────────────────────────────
@@ -30,49 +32,6 @@ using M3D                        = Eigen::Matrix3d;
 using V3D                        = Eigen::Vector3d;
 template <int R, int C> using MD = Eigen::Matrix<double, R, C>;
 template <int N> using VD        = Eigen::Matrix<double, N, 1>;
-
-// ── SO(3) 工具宏与函数 ─────────────────────────────────────────────
-
-// 反对称矩阵工具（等价于 FAST-LIVO2 utils/so3_math.h）
-[[nodiscard]] inline Eigen::Matrix3d skewSym(const Eigen::Vector3d& v) noexcept {
-    Eigen::Matrix3d m;
-    m << 0.0, -v[2], v[1], v[2], 0.0, -v[0], -v[1], v[0], 0.0;
-    return m;
-}
-
-/// Rodrigues 公式: exp(ang) ∈ SO(3)
-/// 等价于 so3_math.h: Exp(const Eigen::Matrix<T, 3, 1>&&)
-inline Eigen::Matrix3d Exp(const Eigen::Vector3d& ang) {
-    double ang_norm      = ang.norm();
-    Eigen::Matrix3d Eye3 = Eigen::Matrix3d::Identity();
-    if (ang_norm > 1e-7) {
-        Eigen::Vector3d r_axis = ang / ang_norm;
-        Eigen::Matrix3d K      = skewSym(r_axis);
-        return Eye3 + std::sin(ang_norm) * K + (1.0 - std::cos(ang_norm)) * K * K;
-    }
-    return Eye3;
-}
-
-/// Rodrigues 公式: exp(v1, v2, v3) ∈ SO(3)
-/// 等价于 so3_math.h: Exp(const T&, const T&, const T&)
-inline Eigen::Matrix3d Exp(const double v1, const double v2, const double v3) {
-    double norm          = std::sqrt(v1 * v1 + v2 * v2 + v3 * v3);
-    Eigen::Matrix3d Eye3 = Eigen::Matrix3d::Identity();
-    if (norm > 1e-5) {
-        Eigen::Vector3d r_axis(v1 / norm, v2 / norm, v3 / norm);
-        Eigen::Matrix3d K = skewSym(r_axis);
-        return Eye3 + std::sin(norm) * K + (1.0 - std::cos(norm)) * K * K;
-    }
-    return Eye3;
-}
-
-/// 对数映射: SO(3) → so(3)
-/// 等价于 so3_math.h: Log(const Eigen::Matrix<T, 3, 3>&)
-inline Eigen::Vector3d Log(const Eigen::Matrix3d& R) {
-    double theta = (R.trace() > 3.0 - 1e-6) ? 0.0 : std::acos(0.5 * (R.trace() - 1.0));
-    Eigen::Vector3d K(R(2, 1) - R(1, 2), R(0, 2) - R(2, 0), R(1, 0) - R(0, 1));
-    return (std::abs(theta) < 0.001) ? (0.5 * K) : (0.5 * theta / std::sin(theta) * K);
-}
 
 /// 旋转矩阵 → 欧拉角 (ZYX)
 inline Eigen::Vector3d RotMtoEuler(const Eigen::Matrix3d& rot) {
@@ -122,8 +81,8 @@ struct alignas(16) pointWithVar {
 // 差异:
 //   - DIM_STATE = 18（原 19，去掉了 inv_expo_time）
 //   - 不使用 Sophus，纯 Eigen 实现 SO(3) 运算
-//   - operator+ 使用 Exp() 更新旋转（so(3) → SO(3)）
-//   - operator- 使用 Log() 计算旋转差（SO(3) → so(3)）
+//   - operator+ 使用 SO3 exponential 更新旋转（so(3) → SO(3)）
+//   - operator- 使用 SO3 logarithm 计算旋转差（SO(3) → so(3)）
 //   - 协方差初始化与原版一致（仅索引平移一位）
 struct alignas(16) StatesGroup {
     M3D rot_end;                  // 帧末姿态旋转矩阵 (world frame)
@@ -171,18 +130,20 @@ struct alignas(16) StatesGroup {
     /// 布局: [0-2]=rot, [3-5]=pos, [6-8]=vel, [9-11]=bg, [12-14]=ba, [15-17]=gravity
     StatesGroup operator+(const VD<DIM_STATE>& state_add) const {
         StatesGroup a;
-        a.rot_end = this->rot_end * Exp(state_add(0, 0), state_add(1, 0), state_add(2, 0));
-        a.pos_end = this->pos_end + state_add.block<3, 1>(3, 0);
-        a.vel_end = this->vel_end + state_add.block<3, 1>(6, 0);
-        a.bias_g  = this->bias_g + state_add.block<3, 1>(9, 0);
-        a.bias_a  = this->bias_a + state_add.block<3, 1>(12, 0);
-        a.gravity = this->gravity + state_add.block<3, 1>(15, 0);
-        a.cov     = this->cov;
+        const V3D rotation_delta = state_add.block<3, 1>(0, 0);
+        a.rot_end                = this->rot_end * lie::SO3d::exp(rotation_delta);
+        a.pos_end                = this->pos_end + state_add.block<3, 1>(3, 0);
+        a.vel_end                = this->vel_end + state_add.block<3, 1>(6, 0);
+        a.bias_g                 = this->bias_g + state_add.block<3, 1>(9, 0);
+        a.bias_a                 = this->bias_a + state_add.block<3, 1>(12, 0);
+        a.gravity                = this->gravity + state_add.block<3, 1>(15, 0);
+        a.cov                    = this->cov;
         return a;
     }
 
     StatesGroup& operator+=(const VD<DIM_STATE>& state_add) {
-        this->rot_end = this->rot_end * Exp(state_add(0, 0), state_add(1, 0), state_add(2, 0));
+        const V3D rotation_delta = state_add.block<3, 1>(0, 0);
+        this->rot_end            = this->rot_end * lie::SO3d::exp(rotation_delta);
         this->pos_end += state_add.block<3, 1>(3, 0);
         this->vel_end += state_add.block<3, 1>(6, 0);
         this->bias_g += state_add.block<3, 1>(9, 0);
@@ -194,8 +155,7 @@ struct alignas(16) StatesGroup {
     /// state_a - state_b: 返回 DIM_STATE 维差分
     VD<DIM_STATE> operator-(const StatesGroup& b) const {
         VD<DIM_STATE> a;
-        M3D rotd(b.rot_end.transpose() * this->rot_end);
-        a.block<3, 1>(0, 0)  = Log(rotd);
+        a.block<3, 1>(0, 0)  = lie::SO3d::log(b.rot_end.transpose() * this->rot_end);
         a.block<3, 1>(3, 0)  = this->pos_end - b.pos_end;
         a.block<3, 1>(6, 0)  = this->vel_end - b.vel_end;
         a.block<3, 1>(9, 0)  = this->bias_g - b.bias_g;

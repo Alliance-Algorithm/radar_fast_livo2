@@ -37,20 +37,6 @@ namespace {
 
     constexpr double G_M_S2 = 9.81; // 重力常数（广东地区）
 
-    // Rodrigues' formula: exp(omega * dt) ∈ SO(3)
-    // 等价于 FAST-LIVO2 utils/so3_math.h: Exp(ang_vel, dt)
-    Eigen::Matrix3d exp_so3(const Eigen::Vector3d& ang_vel, const double dt) {
-        const double ang_vel_norm = ang_vel.norm();
-        if (ang_vel_norm < 1e-7) {
-            return Eigen::Matrix3d::Identity();
-        }
-        const Eigen::Vector3d axis = ang_vel / ang_vel_norm;
-        const double ang           = ang_vel_norm * dt;
-        Eigen::Matrix3d K;
-        K << 0.0, -axis.z(), axis.y(), axis.z(), 0.0, -axis.x(), -axis.y(), axis.x(), 0.0;
-        return Eigen::Matrix3d::Identity() + std::sin(ang) * K + (1.0 - std::cos(ang)) * K * K;
-    }
-
     // 按 curvature（帧内时间偏移，毫秒）升序排序
     // 等价于 FAST-LIVO2: bool time_list(PointType&, PointType&)
     bool time_list(const PointType& x, const PointType& y) { return x.curvature < y.curvature; }
@@ -223,7 +209,7 @@ void ImuProcess::imu_init(const MeasureGroup& meas, StatesGroup& state) {
 //   1. 将上一帧末尾 IMU 与当前帧 IMU 序列拼接，保证时间连续性
 //   2. 正向传播：对每一对连续 IMU 测量，用中值角速度/加速度积分状态
 //      与协方差：
-//        R_{k+1} = R_k * Exp(w_k, dt)
+//        R_{k+1} = R_k * SO3 exponential(w_k * dt)
 //        v_{k+1} = v_k + (R_k * a_k + g) * dt
 //        p_{k+1} = p_k + v_k * dt + 0.5 * (R_k * a_k + g) * dt^2
 //        P_{k+1} = F_x * P_k * F_x^T + cov_w
@@ -327,12 +313,12 @@ void ImuProcess::undistort_pcl(
         }
 
         // ── 协方差传播：F_x * P * F_x^T + cov_w（Oracle C2）──
-        const Eigen::Matrix3d acc_avr_skew = skewSym(acc_avr);
+        const Eigen::Matrix3d acc_avr_skew = lie::SO3d::hat(acc_avr);
 
         F_x.setIdentity();
         cov_w.setZero();
 
-        F_x.block<3, 3>(0, 0) = exp_so3(angvel_avr, -dt);
+        F_x.block<3, 3>(0, 0) = lie::SO3d::exp(angvel_avr, -dt);
         if (ba_bg_est_en_) {
             F_x.block<3, 3>(0, 9) = -Eigen::Matrix3d::Identity() * dt;
         }
@@ -353,7 +339,7 @@ void ImuProcess::undistort_pcl(
         state.cov = F_x * state.cov * F_x.transpose() + cov_w;
 
         // 姿态传播（罗德里格斯公式）
-        R_imu = R_imu * exp_so3(angvel_avr, dt);
+        R_imu = R_imu * lie::SO3d::exp(angvel_avr, dt);
 
         // 世界系下 IMU 加速度（含重力，来自调用方状态，闭环）
         acc_imu = R_imu * acc_avr + state.gravity;
@@ -402,7 +388,7 @@ void ImuProcess::undistort_pcl(
     //   P_compensate = extR_Ri * (R_i * (R_LI * P_raw + t_LI) + T_ei) - exrR_extT
     //
     // 其中：
-    //   R_i   = R_head * Exp(w_head, dt)     — 点测量时刻的姿态（世界系）
+    //   R_i   = R_head * SO3 exponential(w_head * dt) — 点测量时刻的姿态（世界系）
     //   T_ei  = p_head + v_head*dt + a_head*dt²/2 - p_end  — 测量时刻→帧末的平移
     //   extR_Ri    = R_LI^T * R_end^T                     — 帧末世界系→帧末 Lidar 系
     //   exrR_extT  = R_LI^T * t_LI                        — IMU→Lidar 平移在 Lidar 系下
@@ -440,7 +426,7 @@ void ImuProcess::undistort_pcl(
             const double dt = it_pcl->curvature / 1000.0 - head->offset_time;
 
             // 点测量时刻的姿态 R_i (world frame)
-            const Eigen::Matrix3d R_i(R_head * exp_so3(w_head, dt));
+            const Eigen::Matrix3d R_i(R_head * lie::SO3d::exp(w_head, dt));
 
             // 测量时刻 → 帧末的平移 T_ei (world frame, to end)
             const Eigen::Vector3d T_ei(
@@ -471,8 +457,8 @@ void ImuProcess::undistort_pcl(
 //
 // 简化处理:
 //   1. 按 curvature 排序点云
-//   2. 匀速运动假设：pos_end += vel_end * dt，rot_end *= Exp(bias_g, dt)
-//   3. 逆向去畸变：旋转补偿（Exp(-bias_g * dt)）+ 平移补偿（-vel * dt）
+//   2. 匀速运动假设：pos_end += vel_end * dt，rot_end *= SO3 exponential(bias_g * dt)
+//   3. 逆向去畸变：旋转补偿（SO3 exponential(-bias_g * dt)）+ 平移补偿（-vel * dt）
 //
 // 跳过:
 //   - 协方差传播（无 IMU 数据无法构造 F_x/cov_w 中依赖角速度/加速度的项）
@@ -508,7 +494,7 @@ void ImuProcess::forward_without_imu(
     time_last_scan_ = pcl_beg_time;
 
     // ── 简单位姿传播（匀速模型 + 零偏旋转）──
-    const Eigen::Matrix3d Exp_f = exp_so3(state.bias_g, dt);
+    const Eigen::Matrix3d Exp_f = lie::SO3d::exp(state.bias_g, dt);
     state.rot_end               = state.rot_end * Exp_f;
     state.pos_end               = state.pos_end + state.vel_end * dt;
 
@@ -516,7 +502,7 @@ void ImuProcess::forward_without_imu(
     auto it_pcl = pcl_wait_proc_.points.end() - 1;
     for (; it_pcl != pcl_wait_proc_.points.begin(); --it_pcl) {
         const double dt_j = pcl_end_offset_time - it_pcl->curvature / 1000.0;
-        const Eigen::Matrix3d R_jk(exp_so3(state.bias_g, -dt_j));
+        const Eigen::Matrix3d R_jk(lie::SO3d::exp(state.bias_g, -dt_j));
         const Eigen::Vector3d P_j(it_pcl->x, it_pcl->y, it_pcl->z);
         const Eigen::Vector3d p_jk         = -state.rot_end.transpose() * state.vel_end * dt_j;
         const Eigen::Vector3d P_compensate = R_jk * P_j + p_jk;

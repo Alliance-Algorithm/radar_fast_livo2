@@ -415,7 +415,7 @@ void VoxelMapManager::StateEstimation(StatesGroup& state_propagat) {
         body_cov_list_.push_back(var);
 
         point_this         = extR_ * point_this + extT_;
-        M3D point_crossmat = skewSym(point_this);
+        M3D point_crossmat = lie::SO3d::hat(point_this);
         cross_mat_list_.push_back(point_crossmat);
     }
 
@@ -500,7 +500,7 @@ void VoxelMapManager::StateEstimation(StatesGroup& state_propagat) {
             V3D point_this(ptpl.point_b_);
             point_this = extR_ * point_this + extT_;
 
-            M3D point_crossmat = skewSym(point_this);
+            M3D point_crossmat = lie::SO3d::hat(point_this);
 
             V3D point_world = state_propagat.rot_end * point_this + state_propagat.pos_end;
 
@@ -640,7 +640,7 @@ void VoxelMapManager::BuildVoxelMap() {
             static_cast<float>(config_setting_.beam_err_), var);
 
         V3D point_imu      = extR_ * point_this + extT_;
-        M3D point_crossmat = skewSym(point_imu);
+        M3D point_crossmat = lie::SO3d::hat(point_imu);
 
         // world-frame 协方差: sensor noise + rotation uncertainty + translation uncertainty
         var = (state_.rot_end * extR_) * var * (state_.rot_end * extR_).transpose()

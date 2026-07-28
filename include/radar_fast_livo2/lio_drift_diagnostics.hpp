@@ -58,9 +58,9 @@ struct LioDriftMetrics {
     // ── IMU-prior → LiDAR-posterior corrections ──
     m.pos_correction = (posterior.pos_end - prior.pos_end).norm();
 
-    // Rotation delta: Log(prior_R^T * posterior_R) → axis-angle vector
+    // Rotation delta: logarithm(prior_R^T * posterior_R) → axis-angle vector
     const M3D rot_diff = prior.rot_end.transpose() * posterior.rot_end;
-    m.ang_correction   = Log(rot_diff).norm() * 180.0 / std::numbers::pi;
+    m.ang_correction   = lie::SO3d::log(rot_diff).norm() * 180.0 / std::numbers::pi;
 
     // ── Bias norms ──
     m.gyro_bias_norm  = posterior.bias_g.norm();
