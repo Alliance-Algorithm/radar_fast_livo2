@@ -34,7 +34,6 @@ find_package(Eigen3 REQUIRED)
 find_package(OpenCV REQUIRED)
 find_package(OpenMP REQUIRED)
 find_package(hikcamera REQUIRED)
-find_package(GTSAM REQUIRED)
 
 ament_auto_find_build_dependencies()
 
@@ -74,19 +73,6 @@ ament_auto_add_executable(${PROJECT_NAME}_node
 )
 target_link_libraries(${PROJECT_NAME}_node ${PROJECT_NAME}_core)
 
-# ── GTSAM loop closure backend (standalone, decoupled from LIO) ──
-# Separate library + node: LIO does NOT link GTSAM.
-add_library(gtsam_backend_lib STATIC
-    src/gtsam_backend.cpp
-)
-target_link_libraries(gtsam_backend_lib gtsam)
-target_include_directories(gtsam_backend_lib PUBLIC include)
-
-ament_auto_add_executable(gtsam_backend_node
-    src/gtsam_backend_node.cpp
-)
-target_link_libraries(gtsam_backend_node gtsam_backend_lib)
-
 if(BUILD_TESTING)
     find_package(ament_cmake_gtest REQUIRED)
     find_package(ament_lint_auto REQUIRED)
@@ -105,8 +91,12 @@ if(BUILD_TESTING)
     # ── LIO drift diagnostics unit tests ────────────────────────
     ament_add_gtest(test_lio_drift_diagnostics test/test_lio_drift_diagnostics.cpp)
     target_link_libraries(test_lio_drift_diagnostics ${PROJECT_NAME}_core)
+
+    ament_add_gtest(test_lie test/test_lie.cpp)
+    target_include_directories(test_lie PRIVATE include)
+    target_link_libraries(test_lie Eigen3::Eigen)
 endif()
 
-install(TARGETS ${PROJECT_NAME}_node gtsam_backend_node DESTINATION lib/${PROJECT_NAME})
+install(TARGETS ${PROJECT_NAME}_node DESTINATION lib/${PROJECT_NAME})
 install(DIRECTORY config DESTINATION share/${PROJECT_NAME})
 ament_package()

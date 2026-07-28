@@ -19,7 +19,6 @@
   <depend>tf2_ros</depend>
   <depend>tf2_geometry_msgs</depend>
   <depend>visualization_msgs</depend>
-  <depend>message_filters</depend>
   <depend>eigen</depend>
   <depend>hikcamera</depend>
   <depend>ament_cmake_auto</depend>
