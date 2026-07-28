@@ -76,6 +76,12 @@ ament_auto_add_executable(${PROJECT_NAME}_node
 )
 target_link_libraries(${PROJECT_NAME}_node ${PROJECT_NAME}_core)
 
+# ── GTSAM loop closure backend (standalone, decoupled from LIO) ──
+ament_auto_add_executable(gtsam_backend_node
+    src/gtsam_backend_node.cpp
+)
+target_link_libraries(gtsam_backend_node ${PROJECT_NAME}_core)
+
 if(BUILD_TESTING)
     find_package(ament_cmake_gtest REQUIRED)
     find_package(ament_lint_auto REQUIRED)
@@ -96,6 +102,6 @@ if(BUILD_TESTING)
     target_link_libraries(test_lio_drift_diagnostics ${PROJECT_NAME}_core)
 endif()
 
-install(TARGETS ${PROJECT_NAME}_node DESTINATION lib/${PROJECT_NAME})
+install(TARGETS ${PROJECT_NAME}_node gtsam_backend_node DESTINATION lib/${PROJECT_NAME})
 install(DIRECTORY config DESTINATION share/${PROJECT_NAME})
 ament_package()

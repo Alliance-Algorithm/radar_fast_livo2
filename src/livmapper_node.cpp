@@ -65,7 +65,6 @@
 
 #include "radar_fast_livo2/lio_drift_diagnostics.hpp"
 #include "radar_fast_livo2/voxel_map.hpp"
-#include "radar_fast_livo2/gtsam_backend.hpp"
 
 namespace radar::fast_livo2 {
 
@@ -878,24 +877,6 @@ private:
             }
         }
 
-        // ── 8.6. GTSAM Loop Closure Backend ──
-        if (gtsam_enabled_) {
-            const Eigen::Quaterniond q(state_.rot_end);
-            gtsam::Pose3 pose(gtsam::Rot3::Quaternion(q.w(), q.x(), q.y(), q.z()),
-                              gtsam::Point3(state_.pos_end.x(), state_.pos_end.y(), state_.pos_end.z()));
-            bool is_kf = gtsam_backend_.add_odometry(pose, frame_end);
-            if (is_kf) {
-                gtsam_backend_.try_loop_closure(pose, gtsam_backend_.latest_idx());
-                gtsam::Pose3 corrected = gtsam_backend_.optimize();
-                if (gtsam_backend_.num_loops() > 0 && gtsam_backend_.latest_idx() % 50 == 0) {
-                    RCLCPP_INFO_THROTTLE(get_logger(), *get_clock(), 10000,
-                        "[GTSAM] kf=%d loops=%d edges=%d | drift corrected",
-                        gtsam_backend_.latest_idx(), gtsam_backend_.num_loops(),
-                        gtsam_backend_.num_edges());
-                }
-            }
-        }
-
         auto t2 = clock::now();
 
         // ── 9. 增量更新体素地图 ──
@@ -1223,11 +1204,6 @@ private:
     bool gravity_is_stationary_ = false;
     V3D gravity_stationary_acc_{0, 0, 0};
     int gravity_stationary_count_ = 0;
-
-    // GTSAM loop closure backend
-    GtsamBackend::Config gtsam_cfg_{};
-    GtsamBackend gtsam_backend_{gtsam_cfg_};
-    bool gtsam_enabled_ = true;
 
     // 视觉直接法前端（仅 LIVO 模式启用）
     VIOManager vio_manager_;
