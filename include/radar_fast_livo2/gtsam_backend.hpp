@@ -24,8 +24,8 @@ public:
     struct Config {
         double keyframe_dist = 0.5;   // meters between keyframes
         double keyframe_ang  = 15.0;   // degrees between keyframes
-        double loop_radius   = 3.0;    // loop closure search radius (m)
-        int    loop_min_skip = 30;     // minimum keyframe index gap
+        double loop_radius   = 1.0;    // loop closure search radius (m)
+        int    loop_min_skip = 20;     // minimum keyframe index gap
     };
 
     explicit GtsamBackend(const Config& cfg);

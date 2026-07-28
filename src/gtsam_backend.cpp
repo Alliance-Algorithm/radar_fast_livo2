@@ -50,11 +50,12 @@ bool GtsamBackend::add_odometry(const gtsam::Pose3& pose, double timestamp) {
         return true;
     }
 
-    // Odometry factor
+    // Odometry factor: 1% LIO drift → ~0.005m per 0.5m keyframe
+    // Use 0.02m std to allow correction without over-trusting loop edges.
     auto& [prev_idx, prev_pose, _] = keyframes_[keyframes_.size() - 2];
     gtsam::Pose3 delta = prev_pose.between(pose);
     auto odom_noise = gtsam::noiseModel::Diagonal::Sigmas(
-        (gtsam::Vector(6) << 1e-3, 1e-3, 1e-3, 1e-1, 1e-1, 1e-1).finished());
+        (gtsam::Vector(6) << 1e-3, 1e-3, 1e-3, 2e-2, 2e-2, 2e-2).finished());
     graph_.add(gtsam::BetweenFactor<gtsam::Pose3>(
         X(prev_idx), X(idx), delta, odom_noise));
     initial_.insert(X(idx), pose);
@@ -70,8 +71,9 @@ int GtsamBackend::try_loop_closure(const gtsam::Pose3& pose, int kf_idx) {
         if (kf_idx - candidate_idx < cfg_.loop_min_skip) continue;
         double dist = point_distance(pose.translation(), candidate_pose.translation());
         if (dist < cfg_.loop_radius) {
+            // Loop closure: ~0.3m drift @30m path, 0.3m std matches expectation
             auto loop_noise = gtsam::noiseModel::Diagonal::Sigmas(
-                (gtsam::Vector(6) << 5e-2, 5e-2, 5e-2, 0.5, 0.5, 0.5).finished());
+                (gtsam::Vector(6) << 5e-2, 5e-2, 5e-2, 0.3, 0.3, 0.3).finished());
             graph_.add(gtsam::BetweenFactor<gtsam::Pose3>(
                 X(kf_idx), X(candidate_idx), gtsam::Pose3(), loop_noise));
             loop_count_++;
