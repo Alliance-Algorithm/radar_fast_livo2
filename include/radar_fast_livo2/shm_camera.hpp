@@ -66,7 +66,7 @@
 =======
 #include "hikcamera/shm.hpp"
 
-    >>>>>>> feat/lio-tuning-safety-gate namespace radar::fast_livo2 {
+    >>>>>>> feat / lio - tuning - safety - gate namespace radar::fast_livo2 {
 
     // Local error codes — SDK exposes SHMRead as expected<void,string> only.
     // Keep a typed surface so callers (and tests) can branch without string match.
