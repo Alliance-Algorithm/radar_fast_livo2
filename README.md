@@ -5,6 +5,11 @@ Odometry）移植到 ROS2 Jazzy，适配全局曝光（global-shutter）面阵�
 高频 IMU + 卷帘快门相机。LIO（LiDAR-IMU）部分已在真实硬件上完成静止漂移和
 走圈闭环验证；VIO（视觉直接法）部分代码完整实现，尚未接入真实相机硬件测试。
 
+![radar_fast_livo2 architecture](../../../docs/architecture/radar-fast-livo2-architecture.svg)
+
+上图展示独立的 LiDAR-IMU-Visual 估计模块；它与主系统的 `radar_lidar` →
+`radar_fusion` 定位/跟踪链路分开运行。
+
 最终硬件验证结果（40m 走圈）：
 
 ```
