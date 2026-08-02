@@ -89,7 +89,6 @@ radar_fast_livo2_node:
            0.0, 1.0, 0.0,
            0.0, 0.0, 1.0]
 
-<<<<<<< HEAD
     # ── 相机内参（camera_calib.json @5472x3648 ×0.5 → 2736x1824）──
     cam_fx: 3376.849308
     cam_fy: 3368.725055
@@ -98,17 +97,6 @@ radar_fast_livo2_node:
     cam_width: 2736
     cam_height: 1824
     img_scale: 0.5
-=======
-    # ── 相机内参（HIK 12MP, 5472×3648 → LIVO 降采样至 2736×1824）────
-    # Source: camera_calib.json (OpenCV pinhole + radial-tangential distortion)
-    cam_fx: 3376.85        # 6753.70 / 2
-    cam_fy: 3368.73        # 6737.45 / 2
-    cam_cx: 1310.37        # 2620.75 / 2
-    cam_cy: 962.03         # 1924.06 / 2
-    cam_width: 2736
-    cam_height: 1824
-    img_scale: 0.5          # 全分辨率→目标分辨率的缩放比例
->>>>>>> feat/lio-tuning-safety-gate
 
     # ── VIO（LIVO模式才生效）────────────────────────────────────
     patch_size: 8
