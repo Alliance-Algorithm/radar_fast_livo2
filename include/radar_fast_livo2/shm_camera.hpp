@@ -51,9 +51,13 @@
 
 #include <opencv2/core/mat.hpp>
 
-#include "hikcamera/shm.hpp"
+#include "hikcamera/shared_frame_reader.hpp"
 
 namespace radar::fast_livo2 {
+
+/// Max accepted source RGB image size (bytes).  Legacy constant kept from
+/// the old imageSHM layout; used only for input sanity checks.
+constexpr size_t MAX_IMAGE_SIZE = 100u << 20;  // 100 MiB
 
 // ── ShmCameraError: typed error for ShmCamera operations ────────────
 enum class ShmCameraErrorCode {
@@ -131,8 +135,7 @@ private:
     int target_width_ { 0 };                 // VIO grayscale output width
     int target_height_ { 0 };                // VIO grayscale output height
     double img_time_offset_ { 0.0 };
-    int shm_fd_ { -1 };                      // SHM file descriptor from SHMInit
-    hikcamera::imageSHM* shm_ptr_ { nullptr }; // persistent mapping from SHMGetPtr
+    hikcamera::SharedFrameReader reader_;    // RAII SHM ring reader (new SDK)
     size_t image_bytes_ { 0 };               // expected RGB byte count (source_w * source_h * 3)
     bool is_open_ { false };
 };
