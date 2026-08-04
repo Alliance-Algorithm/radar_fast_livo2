@@ -86,16 +86,14 @@ struct CameraFrame {
 // to owned storage, then gray-converted outside the SHM critical section.
 class ShmCamera {
 public:
-        /// @param shm_name        POSIX SHM segment name (e.g. "/hikcamera_shm")
+    /// @param shm_name        POSIX SHM segment name (e.g. "/hikcamera_shm")
     /// @param source_width     raw SHM RGB width  (hikcamera.yaml, e.g. 5472)
     /// @param source_height    raw SHM RGB height (hikcamera.yaml, e.g. 3648)
     /// @param target_width     VIO grayscale output width  (odin_livo2.yaml, e.g. 2736)
     /// @param target_height    VIO grayscale output height (odin_livo2.yaml, e.g. 1824)
     /// @param img_time_offset  additive offset applied to host_monotonic_ns/1e9
-    ShmCamera(std::string shm_name,
-              int source_width, int source_height,
-              int target_width, int target_height,
-              double img_time_offset);
+    ShmCamera(std::string shm_name, int source_width, int source_height, int target_width,
+        int target_height, double img_time_offset);
 
     ShmCamera(const ShmCamera&)            = delete;
     ShmCamera& operator=(const ShmCamera&) = delete;
@@ -118,22 +116,20 @@ public:
     /// Pure conversion: RGB (CV_8UC3) cv::Mat at source resolution → owned
     /// CV_8UC1 grayscale at target resolution.  No hardware required —
     /// callable from tests.  Does cvtColor at source resolution then resize.
-    [[nodiscard]] static auto convert(const cv::Mat& rgb,
-        int source_width, int source_height,
-        int target_width, int target_height,
-        uint64_t host_monotonic_ns, uint64_t frame_id, uint64_t committed_sequence,
-        double img_time_offset) -> CameraFrame;
+    [[nodiscard]] static auto convert(const cv::Mat& rgb, int source_width, int source_height,
+        int target_width, int target_height, uint64_t host_monotonic_ns, uint64_t frame_id,
+        uint64_t committed_sequence, double img_time_offset) -> CameraFrame;
 
 private:
     std::string shm_name_;
-    int source_width_ { 0 };                 // raw SHM RGB width  (hikcamera.yaml)
-    int source_height_ { 0 };                // raw SHM RGB height (hikcamera.yaml)
-    int target_width_ { 0 };                 // VIO grayscale output width
-    int target_height_ { 0 };                // VIO grayscale output height
+    int source_width_ { 0 };  // raw SHM RGB width  (hikcamera.yaml)
+    int source_height_ { 0 }; // raw SHM RGB height (hikcamera.yaml)
+    int target_width_ { 0 };  // VIO grayscale output width
+    int target_height_ { 0 }; // VIO grayscale output height
     double img_time_offset_ { 0.0 };
-    int shm_fd_ { -1 };                      // SHM file descriptor from SHMInit
+    int shm_fd_ { -1 };                        // SHM file descriptor from SHMInit
     hikcamera::imageSHM* shm_ptr_ { nullptr }; // persistent mapping from SHMGetPtr
-    size_t image_bytes_ { 0 };               // expected RGB byte count (source_w * source_h * 3)
+    size_t image_bytes_ { 0 };                 // expected RGB byte count (source_w * source_h * 3)
     bool is_open_ { false };
 };
 
