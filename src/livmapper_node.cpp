@@ -472,7 +472,7 @@ private:
             if (!result) {
                 const auto& err = result.error();
                 if (err.code == ShmCameraErrorCode::Timeout) {
-                    continue;           // timeout: normal, retry
+                    continue; // timeout: normal, retry
                 }
                 // Fatal reader error: log once, terminate worker
                 RCLCPP_ERROR(get_logger(), "Camera SHM fatal read error: %s", err.message.c_str());
